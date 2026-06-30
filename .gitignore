@@ -1,0 +1,22 @@
+# Runtime/secret artifacts (never commit)
+.env
+token.json
+credentials.json
+spotify_token.json
+anthropic_usage.json
+telegram_chat.json
+telegram_pairing.txt
+training_log.json
+tasks.json
+wake_diag.log
+.jarvis_last_briefing
+.jarvis_last_backup
+.jarvis_show
+*.mp3
+*.wav
+Obsidian_Vault/
+backups/
+.portal_profile/
+.face_profile/
+__pycache__/
+*.pyc
