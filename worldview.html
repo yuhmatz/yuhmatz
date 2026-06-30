@@ -1,0 +1,287 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no" />
+<title>ACHILLES · WorldView</title>
+<style>
+  :root{ --amber:#ff8c42; --amber2:#ffa55f; --ink:#0a0c10; --panel:rgba(12,15,20,.82);
+         --text:#e6edf3; --muted:#8b97a5; --divider:#222a35; }
+  html,body{margin:0;height:100%;background:var(--ink);color:var(--text);
+            font-family:"Segoe UI",system-ui,Arial,sans-serif;overflow:hidden;}
+  #map{position:absolute;inset:0;}
+  #boot{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;
+        z-index:9;color:var(--muted);font-size:14px;letter-spacing:.05em;}
+  #hud{position:absolute;top:14px;left:14px;z-index:5;background:var(--panel);
+       border:1px solid var(--divider);border-radius:14px;padding:12px 16px;
+       backdrop-filter:blur(6px);min-width:210px;}
+  #hud .brand{color:var(--amber);font-weight:700;letter-spacing:.12em;font-size:15px;}
+  #hud .sub{color:var(--muted);font-size:11px;margin-top:2px;letter-spacing:.06em;}
+  #clock{font-family:Consolas,monospace;font-size:24px;color:var(--amber2);margin-top:8px;}
+  #counts{font-size:12px;color:var(--text);margin-top:8px;line-height:1.7;}
+  #counts .dot{display:inline-block;width:9px;height:9px;border-radius:50%;
+               margin-right:7px;vertical-align:middle;}
+  #status{font-size:11px;color:var(--muted);margin-top:8px;min-height:14px;}
+  #toggles{position:absolute;top:14px;right:14px;z-index:5;display:flex;flex-direction:column;gap:8px;}
+  .tg{background:var(--panel);border:1px solid var(--divider);border-radius:12px;
+      color:var(--text);padding:9px 14px;font-size:13px;cursor:pointer;user-select:none;
+      backdrop-filter:blur(6px);transition:.15s;text-align:left;min-width:118px;}
+  .tg:hover{border-color:var(--amber);}
+  .tg.off{opacity:.42;}
+  .tg .sw{float:right;font-weight:700;}
+  #detail{position:absolute;left:14px;bottom:14px;z-index:6;background:var(--panel);
+          border:1px solid var(--divider);border-radius:14px;padding:14px 18px;
+          max-width:330px;display:none;backdrop-filter:blur(6px);}
+  #detail h3{margin:0 0 8px;color:var(--amber);font-size:15px;}
+  #detail table{font-size:12.5px;border-collapse:collapse;}
+  #detail td{padding:2px 0;vertical-align:top;}
+  #detail td.k{color:var(--muted);padding-right:12px;white-space:nowrap;}
+  #detail .x{position:absolute;top:8px;right:12px;color:var(--muted);cursor:pointer;font-size:18px;}
+  .maplibregl-popup-content{background:#11151b;color:var(--text);border:1px solid var(--divider);
+                            border-radius:10px;font-size:12px;}
+  .maplibregl-popup-tip{display:none;}
+  #err{position:absolute;bottom:14px;right:14px;z-index:6;color:#ff7b72;font-size:12px;
+       background:var(--panel);border:1px solid #5a2020;border-radius:10px;padding:8px 12px;
+       max-width:340px;display:none;}
+</style>
+</head>
+<body>
+<div id="map"></div>
+<div id="boot">Loading WorldView…</div>
+
+<div id="hud">
+  <div class="brand">ACHILLES · WORLDVIEW</div>
+  <div class="sub">EASTERN MEDITERRANEAN</div>
+  <div id="clock">--:--:--</div>
+  <div id="counts">
+    <div><span class="dot" style="background:#ffd166"></span><b id="c_vessels">0</b> vessels</div>
+    <div><span class="dot" style="background:#ff8c42"></span><b id="c_flights">0</b> aircraft</div>
+    <div><span class="dot" style="background:#ff5d5d"></span><b id="c_quakes">0</b> quakes (24h)</div>
+  </div>
+  <div id="status">starting…</div>
+</div>
+
+<div id="toggles">
+  <div class="tg" data-layer="vessels">Ships<span class="sw">on</span></div>
+  <div class="tg" data-layer="flights">Aircraft<span class="sw">on</span></div>
+  <div class="tg" data-layer="quakes">Quakes<span class="sw">on</span></div>
+  <div class="tg" data-layer="globe">Globe<span class="sw">on</span></div>
+</div>
+
+<div id="detail"><span class="x" id="detail_x">×</span><div id="detail_body"></div></div>
+<div id="err"></div>
+
+<script>
+// ---------------------------------------------------------------------------
+// WorldView frontend (v1). Self-contained: MapLibre GL (loaded with a 3-CDN
+// fallback so one blocked/down CDN doesn't blank the page) + keyless Esri
+// satellite imagery. Polls the JARVIS/Achilles proxy on :7778 for live ships
+// (/vessels) and aircraft (/flights), and USGS for earthquakes. The page is
+// served from the :7777 server; data is fetched from the SAME host on :7778 so
+// it works on the PC (localhost) and on the phone over the LAN.
+// ---------------------------------------------------------------------------
+const PROXY = location.protocol + "//" + (location.hostname || "localhost") + ":7778";
+const ESRI = "https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}";
+
+const CDNS = [
+  { js: "https://unpkg.com/maplibre-gl@5/dist/maplibre-gl.js",
+    css: "https://unpkg.com/maplibre-gl@5/dist/maplibre-gl.css" },
+  { js: "https://cdn.jsdelivr.net/npm/maplibre-gl@5/dist/maplibre-gl.js",
+    css: "https://cdn.jsdelivr.net/npm/maplibre-gl@5/dist/maplibre-gl.css" },
+  { js: "https://cdnjs.cloudflare.com/ajax/libs/maplibre-gl/5.6.0/maplibre-gl.js",
+    css: "https://cdnjs.cloudflare.com/ajax/libs/maplibre-gl/5.6.0/maplibre-gl.css" },
+];
+
+function loadCss(href){ const l = document.createElement("link"); l.rel = "stylesheet"; l.href = href; document.head.appendChild(l); }
+function loadLib(i){
+  if (i >= CDNS.length){ bootFail("Could not load the map library from any CDN. Check the internet connection, sir."); return; }
+  loadCss(CDNS[i].css);
+  const s = document.createElement("script");
+  s.src = CDNS[i].js;
+  s.onload = () => { if (window.maplibregl) initWorldView(); else loadLib(i + 1); };
+  s.onerror = () => loadLib(i + 1);
+  document.head.appendChild(s);
+}
+function bootFail(msg){ const b = document.getElementById("boot"); if (b){ b.textContent = msg; b.style.color = "#ff7b72"; } }
+
+// clock runs regardless of the map
+setInterval(() => { document.getElementById("clock").textContent = new Date().toLocaleTimeString(); }, 1000);
+document.getElementById("detail_x").addEventListener("click", hideDetail);
+loadLib(0);
+
+let map = null, globeOn = true;
+
+function applyGlobe(){ try { map.setProjection({ type: globeOn ? "globe" : "mercator" }); } catch(e){} }
+
+function arrowIcon(color){
+  const s = 26, c = document.createElement("canvas"); c.width = c.height = s;
+  const x = c.getContext("2d"); x.translate(s/2, s/2); x.beginPath();
+  x.moveTo(0,-10); x.lineTo(7,9); x.lineTo(0,4); x.lineTo(-7,9); x.closePath();
+  x.fillStyle = color; x.fill(); x.lineWidth = 1.2; x.strokeStyle = "rgba(0,0,0,.55)"; x.stroke();
+  return x.getImageData(0, 0, s, s);
+}
+function planeIcon(color){
+  const s = 28, c = document.createElement("canvas"); c.width = c.height = s;
+  const x = c.getContext("2d"); x.translate(s/2, s/2); x.fillStyle = color; x.beginPath();
+  x.moveTo(0,-12); x.lineTo(2,-3); x.lineTo(12,4); x.lineTo(12,7); x.lineTo(2,4);
+  x.lineTo(2,10); x.lineTo(5,13); x.lineTo(5,14); x.lineTo(0,12); x.lineTo(-5,14);
+  x.lineTo(-5,13); x.lineTo(-2,10); x.lineTo(-2,4); x.lineTo(-12,7); x.lineTo(-12,4);
+  x.lineTo(-2,-3); x.closePath(); x.fill();
+  x.lineWidth = 0.8; x.strokeStyle = "rgba(0,0,0,.5)"; x.stroke();
+  return x.getImageData(0, 0, s, s);
+}
+
+const EMPTY = { type: "FeatureCollection", features: [] };
+
+function initWorldView(){
+  const b = document.getElementById("boot"); if (b) b.style.display = "none";
+  map = new maplibregl.Map({
+    container: "map",
+    style: { version: 8,
+      sources: { sat: { type: "raster", tiles: [ESRI], tileSize: 256, attribution: "Imagery © Esri" } },
+      layers: [ { id: "bg", type: "background", paint: { "background-color": "#05070a" } },
+                { id: "sat", type: "raster", source: "sat", paint: { "raster-brightness-max": 0.92 } } ] },
+    center: [34.6, 33.2], zoom: 6, attributionControl: false, hash: false,
+  });
+  map.addControl(new maplibregl.NavigationControl({ showCompass: true }), "bottom-right");
+  map.on("error", e => console.warn(e && e.error));
+
+  map.on("load", () => {
+    map.addImage("ship-arrow", arrowIcon("#ffd166"), { pixelRatio: 2 });
+    map.addImage("plane", planeIcon("#ff8c42"), { pixelRatio: 2 });
+    map.addSource("vessels", { type: "geojson", data: EMPTY });
+    map.addSource("flights", { type: "geojson", data: EMPTY });
+    map.addSource("quakes",  { type: "geojson", data: EMPTY });
+
+    map.addLayer({ id: "vessels-dot", type: "circle", source: "vessels", paint: {
+      "circle-radius": ["interpolate", ["linear"], ["zoom"], 4, 2.5, 10, 5],
+      "circle-color": ["get", "color"],
+      "circle-stroke-color": "rgba(0,0,0,.6)", "circle-stroke-width": 1 } });
+    map.addLayer({ id: "vessels-arrow", type: "symbol", source: "vessels",
+      filter: ["has", "heading"], layout: {
+        "icon-image": "ship-arrow", "icon-size": 0.6, "icon-rotate": ["get", "heading"],
+        "icon-rotation-alignment": "map", "icon-allow-overlap": true, "icon-ignore-placement": true } });
+    map.addLayer({ id: "flights-sym", type: "symbol", source: "flights", layout: {
+        "icon-image": "plane", "icon-size": 0.62, "icon-rotate": ["coalesce", ["get", "track"], 0],
+        "icon-rotation-alignment": "map", "icon-allow-overlap": true, "icon-ignore-placement": true } });
+    map.addLayer({ id: "quakes-c", type: "circle", source: "quakes", paint: {
+      "circle-radius": ["interpolate", ["linear"], ["get", "mag"], 1, 3, 6, 22],
+      "circle-color": "rgba(255,93,93,.55)", "circle-stroke-color": "#ff5d5d", "circle-stroke-width": 1 } });
+
+    for (const id of ["vessels-dot", "vessels-arrow", "flights-sym", "quakes-c"]) {
+      map.on("click", id, onFeatureClick);
+      map.on("mouseenter", id, () => map.getCanvas().style.cursor = "pointer");
+      map.on("mouseleave", id, () => map.getCanvas().style.cursor = "");
+    }
+    wireToggles();
+    applyGlobe();
+    pollAll();
+    setInterval(pollVessels, 12000);
+    setInterval(pollFlights, 12000);
+    setInterval(pollQuakes, 5 * 60 * 1000);
+  });
+}
+
+function shipKind(t){
+  t = +t || 0;
+  if (t >= 60 && t < 70) return ["#39d0ff", "Passenger"];
+  if (t >= 70 && t < 80) return ["#ffd166", "Cargo"];
+  if (t >= 80 && t < 90) return ["#ff8c42", "Tanker"];
+  if (t === 30) return ["#7ee787", "Fishing"];
+  if (t >= 31 && t <= 35) return ["#c0caf5", "Tug/Special"];
+  if (t >= 36 && t <= 37) return ["#d2a8ff", "Pleasure"];
+  return ["#e6edf3", t === 0 ? "Unknown" : "Other (" + t + ")"];
+}
+function num(v, d){ return (typeof v === "number" && isFinite(v)) ? v : d; }
+function setData(src, feats){ const s = map.getSource(src); if (s) s.setData({ type: "FeatureCollection", features: feats }); }
+
+async function pollVessels(){
+  try {
+    const r = await fetch(PROXY + "/vessels", { cache: "no-store" });
+    const j = await r.json();
+    const list = j.vessels || [];
+    const feats = list.map(v => {
+      const [color, kindLabel] = shipKind(v.type);
+      const props = { kind: "vessel", mmsi: v.mmsi, name: (v.name || "").trim(),
+                      color, kindLabel, sog: num(v.sog, null), cog: num(v.cog, null) };
+      if (typeof v.heading === "number" && isFinite(v.heading)) props.heading = v.heading;
+      return { type: "Feature", properties: props, geometry: { type: "Point", coordinates: [v.lon, v.lat] } };
+    });
+    setData("vessels", feats);
+    document.getElementById("c_vessels").textContent = feats.length;
+    setStatus("live · " + feats.length + " vessels"); clearErr();
+  } catch (e) {
+    setStatus("vessels: relay offline");
+    showErr("No /vessels data — set AISSTREAM_API_KEY in .env and `pip install websockets`. (" + e.message + ")");
+  }
+}
+async function pollFlights(){
+  try {
+    const r = await fetch(PROXY + "/flights?lat=33&lon=34.8&radius=400", { cache: "no-store" });
+    const j = await r.json();
+    const feats = (j.ac || []).filter(a => a.lat != null && a.lon != null).map(a => ({
+      type: "Feature",
+      properties: { kind: "flight", flight: (a.flight || a.r || "").trim(),
+                    track: num(a.track, 0), alt: a.alt_baro, gs: a.gs, hex: a.hex },
+      geometry: { type: "Point", coordinates: [a.lon, a.lat] } }));
+    setData("flights", feats);
+    document.getElementById("c_flights").textContent = feats.length;
+  } catch (e) { document.getElementById("c_flights").textContent = "–"; }
+}
+async function pollQuakes(){
+  try {
+    const r = await fetch("https://earthquake.usgs.gov/earthquakes/feed/v1.0/summary/all_day.geojson", { cache: "no-store" });
+    const j = await r.json();
+    (j.features || []).forEach(f => { f.properties.mag = num(f.properties.mag, 0); });
+    map.getSource("quakes").setData(j);
+    document.getElementById("c_quakes").textContent = (j.features || []).length;
+  } catch (e) { document.getElementById("c_quakes").textContent = "–"; }
+}
+function pollAll(){ pollVessels(); pollFlights(); pollQuakes(); }
+
+function row(k, v){ return v == null || v === "" ? "" : `<tr><td class="k">${k}</td><td>${v}</td></tr>`; }
+function onFeatureClick(e){
+  const p = (e.features && e.features[0] && e.features[0].properties) || {};
+  let html = "";
+  if (p.kind === "vessel") {
+    html = `<h3>${p.name || "Vessel " + p.mmsi}</h3><table>`
+      + row("MMSI", p.mmsi) + row("Type", p.kindLabel)
+      + row("Speed", p.sog != null ? (+p.sog).toFixed(1) + " kn" : null)
+      + row("Course", p.cog != null ? Math.round(p.cog) + "°" : null)
+      + row("Heading", p.heading != null ? Math.round(p.heading) + "°" : "unknown") + "</table>";
+  } else if (p.kind === "flight") {
+    html = `<h3>${p.flight || "Aircraft"}</h3><table>`
+      + row("Callsign", p.flight) + row("Hex", p.hex)
+      + row("Altitude", p.alt != null ? p.alt + " ft" : null)
+      + row("Ground spd", p.gs != null ? Math.round(p.gs) + " kn" : null)
+      + row("Track", p.track != null ? Math.round(p.track) + "°" : null) + "</table>";
+  } else {
+    html = `<h3>M ${(+p.mag).toFixed(1)} earthquake</h3><table>`
+      + row("Place", p.place) + row("Time", p.time ? new Date(p.time).toLocaleString() : null)
+      + (p.url ? row("USGS", `<a href="${p.url}" target="_blank" style="color:#7cc4ff">details</a>`) : "") + "</table>";
+  }
+  document.getElementById("detail_body").innerHTML = html;
+  document.getElementById("detail").style.display = "block";
+}
+function hideDetail(){ document.getElementById("detail").style.display = "none"; }
+function setStatus(t){ document.getElementById("status").textContent = t; }
+function showErr(t){ const e = document.getElementById("err"); e.textContent = t; e.style.display = "block"; }
+function clearErr(){ document.getElementById("err").style.display = "none"; }
+
+function wireToggles(){
+  document.querySelectorAll(".tg").forEach(btn => {
+    btn.addEventListener("click", () => {
+      const layer = btn.dataset.layer;
+      const on = btn.classList.toggle("off") === false;
+      btn.querySelector(".sw").textContent = on ? "on" : "off";
+      const vis = on ? "visible" : "none";
+      if (layer === "vessels") ["vessels-dot", "vessels-arrow"].forEach(l => map.getLayer(l) && map.setLayoutProperty(l, "visibility", vis));
+      else if (layer === "flights") map.getLayer("flights-sym") && map.setLayoutProperty("flights-sym", "visibility", vis);
+      else if (layer === "quakes") map.getLayer("quakes-c") && map.setLayoutProperty("quakes-c", "visibility", vis);
+      else if (layer === "globe") { globeOn = on; applyGlobe(); }
+    });
+  });
+}
+</script>
+</body>
+</html>

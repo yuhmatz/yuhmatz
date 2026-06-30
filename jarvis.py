@@ -6068,6 +6068,12 @@ class App:
     def _face_req(self):
         if ACHILLES_FACE != "blackhole":
             self._req("expanded")
+            # Apply on the main thread right now so the visual feedback (the orb)
+            # pops the instant the wake fires, not only on the next animate tick.
+            try:
+                self.ui(self._apply_mode)
+            except Exception:
+                pass
 
     def _hide(self):
         self.req_typing = False
