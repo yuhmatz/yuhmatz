@@ -1,7 +1,59 @@
 """
-JARVIS v3.0 — voice assistant: bilingual, web search, tools, red-orange orb
+JARVIS / ACHILLES — voice assistant: bilingual, web search, tools, glowing orb
 ============================================================================
-(Version is updated by hand on each change. Current: v4.66 — 29 Jun 2026.)
+(Version is updated by hand on each change. Current: v4.67 — 30 Jun 2026.)
+
+Changelog:
+  v4.67 - Reliability + safety pass (wake word, display, concurrency,
+          security, resource leaks). WAKE: transcribe_wake no longer
+          stacks VAD + double no-speech filtering, which on the tiny
+          model trimmed a short, isolated "Achilles"/"Jarvis" to an
+          empty string so the wake never fired and nothing came up on
+          screen; it now decodes permissively and relies on WAKE_GATE +
+          detect_wake. The wake hit-guard was loosened from <=4 words to
+          <=8 so the tiny model expanding the clip into a short phrase no
+          longer discards a valid wake. Mic-open failures in the wake
+          loop are now surfaced to the on-screen status instead of only
+          printed to a (non-existent) console. DISPLAY: animate() is now
+          crash-proof - the whole frame is guarded and the after()
+          reschedule lives in a finally, so a single bad render frame can
+          no longer kill the loop and leave the orb permanently hidden on
+          the next wake. CONCURRENCY: conversation_history (shared by the
+          voice turn, Telegram loop and the /ask HTTP thread) is now
+          guarded by a single _think_lock and bounded to the last 24
+          messages, fixing cross-thread corruption (API 400 "roles must
+          alternate"), unbounded token growth, and the orphaned-tool_use
+          poisoning that used to 400 every turn for the rest of the
+          session. SECURITY: the LAN-bound proxy now restricts /ask (runs
+          the brain + spends API budget) and the mutating /todo endpoints
+          to loopback callers, while read-only WorldView data endpoints
+          stay reachable for the phone. RESOURCES: fired timers prune
+          themselves from _active_timers; the v4.40 IPv4 monkeypatch now
+          honours an explicit address family and falls back gracefully
+          instead of forcing AF_INET and breaking IPv6-only resolution.
+          LOGIC: a quiz can always be cancelled (cancel words matched
+          anywhere); "I ran the tests"/"רצתי לחנות" are no longer logged
+          as workouts (a bare cardio verb now needs a number/unit/gym
+          word); generic "everything is better" no longer clears an
+          injury (recovery now needs a "my <part>" shape). VESSELS:
+          AIS heading/COG sentinels (511 / 360 / null) are validated so a
+          ship is never drawn at a fake bearing, and a vessel's timestamp
+          refreshes on every message so static-only transmitters aren't
+          pruned while still active.
+  v4.66 - VESSELS relay: a server-side aisstream.io WebSocket keeps the
+          latest position per ship (Eastern-Med bbox) in memory and serves
+          a snapshot at GET /vessels on the :7778 proxy (needs
+          AISSTREAM_API_KEY + the websockets package).
+  v4.65 - Wake hallucination guard: vad_filter + no_speech filtering on
+          the tiny wake model (superseded/relaxed by v4.67, which found it
+          was dropping real wake words).
+  v4.60 - The face is the PIL black hole drawn inside the original floating
+          orb window; it pops on wake exactly like the orange ball.
+  v4.52 - Achilles Core screen (WebGL black hole + Solar System), live
+          /state heartbeat, planet news, task list.
+  v4.42 - Prompt caching to cut API cost.
+  v4.30 - Monthly Anthropic API cost budget + 'budget' command.
+  (Older entries trimmed in this rebuild; full history in prior versions.)
 """
 import os
 import sys
@@ -275,6 +327,43 @@ Common Israeli cities (canonical English / Hebrew):
 """
 
 conversation_history = []
+# think() is reachable concurrently from the voice turn, the Telegram loop AND
+# the /ask HTTP worker threads, all sharing this one global list. Without a lock
+# their appends interleave and corrupt the message sequence (API 400
+# "roles must alternate" / orphaned tool_use). This serialises the whole
+# read-modify-API-append section of think().
+_think_lock = threading.Lock()
+MAX_HISTORY_MSGS = 24
+
+def _normalize_history():
+    """Keep conversation_history valid and bounded. Caller must hold _think_lock.
+    (1) Drop a trailing assistant turn that holds an unanswered tool_use block
+        (left behind when a reply was truncated mid-tool by max_tokens) - it
+        would otherwise 400 every subsequent call for the rest of the session.
+    (2) Trim to the last MAX_HISTORY_MSGS messages, advancing the window start
+        to a plain-string user message so a tool_use/tool_result pair is never
+        split (which would also 400)."""
+    ch = conversation_history
+    while ch:
+        last = ch[-1]
+        content = last.get("content")
+        has_tool_use = isinstance(content, list) and any(
+            (getattr(b, "type", None) == "tool_use")
+            or (isinstance(b, dict) and b.get("type") == "tool_use")
+            for b in content)
+        if last.get("role") == "assistant" and has_tool_use:
+            ch.pop()
+        else:
+            break
+    if len(ch) > MAX_HISTORY_MSGS:
+        start = len(ch) - MAX_HISTORY_MSGS
+        while start < len(ch):
+            m = ch[start]
+            if m.get("role") == "user" and isinstance(m.get("content"), str):
+                break
+            start += 1
+        if start < len(ch):
+            ch[:] = ch[start:]
 
 def ensure_directories():
     Path(SSD_OBSIDIAN_VAULT).mkdir(parents=True, exist_ok=True)
@@ -375,18 +464,26 @@ def transcribe(model, filename):
     return text, "en"
 
 def transcribe_wake(model, filename):
+    # Wake detection must favour RECALL: a dropped wake word means the user is
+    # silently ignored (no sound, no orb). v4.65 stacked vad_filter=True +
+    # no_speech_threshold=0.6 + a manual no_speech_prob<0.6 filter, which on the
+    # tiny model trimmed a short, isolated "Achilles"/"Jarvis" to "" so the wake
+    # never fired. We rely instead on WAKE_GATE (only transcribe when there is
+    # real audio energy) and detect_wake() (the text must actually contain a
+    # wake word), so we can decode permissively here: no VAD trimming, and keep
+    # every segment unless the model is *extremely* sure the clip is non-speech.
     try:
         segments, _info = model.transcribe(
             filename, beam_size=1, language=None,
-            condition_on_previous_text=False, vad_filter=True,
-            no_speech_threshold=0.6,
+            condition_on_previous_text=False, vad_filter=False,
+            no_speech_threshold=0.85,
         )
     except TypeError:
         segments, _info = model.transcribe(
             filename, beam_size=1, language=None,
             condition_on_previous_text=False,
         )
-    parts = [s.text for s in segments if getattr(s, "no_speech_prob", 0.0) < 0.6]
+    parts = [s.text for s in segments if getattr(s, "no_speech_prob", 1.0) < 0.9]
     return "".join(parts).strip()
 
 def detect_wake(text):
@@ -941,6 +1038,15 @@ _vessels_relay_started = False
 _vessels_relay_lock = threading.Lock()
 _VESSELS_BBOX = [[[29.0, 24.0], [38.0, 37.0]]]
 
+def _ais_bearing(b):
+    """Return b if it is a valid 0-359 AIS bearing, else None. Handles the
+    511 'heading not available' and 360 'COG not available' sentinels, None,
+    and out-of-range junk so the globe never draws a vessel at a fake heading."""
+    try:
+        return b if (b is not None and 0 <= float(b) < 360) else None
+    except (TypeError, ValueError):
+        return None
+
 async def _vessels_ws_loop(api_key):
     import websockets
     url = "wss://stream.aisstream.io/v0/stream"
@@ -970,15 +1076,20 @@ async def _vessels_ws_loop(api_key):
                         lon = pr.get("Longitude", meta.get("longitude"))
                         if lat is None or lon is None:
                             continue
-                        hdg = pr.get("TrueHeading")
-                        cog = pr.get("Cog")
-                        if hdg is None or hdg == 511:
-                            hdg = cog
+                        cog = _ais_bearing(pr.get("Cog"))
+                        heading = _ais_bearing(pr.get("TrueHeading"))
+                        if heading is None:   # fall back to course over ground
+                            heading = cog
+                        sog = pr.get("Sog")
+                        try:
+                            sog = float(sog) if (sog is not None and 0 <= float(sog) < 102.3) else None
+                        except (TypeError, ValueError):
+                            sog = None
                         with _vessels_lock:
                             v = _vessels.get(mmsi, {})
                             v.update({"mmsi": mmsi, "lat": lat, "lon": lon,
-                                      "cog": cog, "sog": pr.get("Sog"),
-                                      "heading": hdg, "ts": now})
+                                      "cog": cog, "sog": sog,
+                                      "heading": heading, "ts": now})
                             nm = (meta.get("ShipName") or "").strip()
                             if nm:
                                 v["name"] = nm
@@ -993,7 +1104,9 @@ async def _vessels_ws_loop(api_key):
                             t = sd.get("Type")
                             if t is not None:
                                 v["type"] = t
-                            v.setdefault("ts", now)
+                            # refresh ts on every message so a vessel that sends
+                            # only static data isn't pruned while still active.
+                            v["ts"] = now
                             _vessels[mmsi] = v
         except Exception as e:
             try:
@@ -1265,6 +1378,15 @@ class _FlightsProxyHandler(http.server.BaseHTTPRequestHandler):
 
     def _handle_ask(self, parsed):
         try:
+            # The proxy binds 0.0.0.0 for phone WorldView access, but /ask runs
+            # the full brain (state mutation, web search, API spend). Restrict it
+            # to loopback so a LAN host / drive-by web page can't drive it.
+            _peer = self.client_address[0] if self.client_address else ""
+            if _peer not in ("127.0.0.1", "::1", "localhost"):
+                self.send_response(403)
+                self._cors_headers()
+                self.end_headers()
+                return
             params = urllib.parse.parse_qs(parsed.query)
             q = (params.get("q", [""])[0] or "").strip()
             if not q:
@@ -1316,6 +1438,16 @@ class _FlightsProxyHandler(http.server.BaseHTTPRequestHandler):
 
     def _handle_todo(self, parsed):
         try:
+            # Allow read-only GET /todo from the LAN (phone can view the list),
+            # but block the mutating actions from non-loopback origins so a
+            # cross-site GET can't add/toggle/delete the user's tasks.
+            if parsed.path != "/todo":
+                _peer = self.client_address[0] if self.client_address else ""
+                if _peer not in ("127.0.0.1", "::1", "localhost"):
+                    self.send_response(403)
+                    self._cors_headers()
+                    self.end_headers()
+                    return
             params = urllib.parse.parse_qs(parsed.query)
             with _tasks_lock:
                 tasks = _tasks_load()
@@ -3278,7 +3410,12 @@ def evaluate_quiz_answer(user_answer, lang="en"):
     ans = (user_answer or "").strip()
     cancel = {"stop", "cancel", "never mind", "nevermind", "forget it",
               "עזוב", "בטל", "עצור", "די", "לא עכשיו"}
-    if ans.lower() in cancel or ans in cancel:
+    _al = ans.lower()
+    _words = set(re.split(r"[\s,.!?]+", _al))
+    # Always let the user bail - match cancel words anywhere, not just exact.
+    if (_al in cancel or ans in cancel
+            or _words & {"stop", "cancel", "forget", "nevermind"}
+            or any(w in ans for w in ("עזוב", "בטל", "עצור"))):
         return ("ביטלתי את החידון, אדוני." if lang == "he"
                 else "Quiz cancelled, sir.")
     if not ANTHROPIC_API_KEY:
@@ -3423,8 +3560,11 @@ def _injury_recovered_parse(msg):
     m = re.match(r"(?:injury\s+recovered|recovered\s+from|healed\s+from)[:\-\s]+(.+)$", text, re.I)
     if m:
         return m.group(1).strip()
-    m = re.match(r"(?:my\s+)?(.+?)\s+(?:has\s+|is\s+)?(?:healed|recovered|better)$", text, re.I)
-    if m:
+    # Require a "my <body-part>" shape so generic sentences like
+    # "everything is better" / "the weather is better" don't falsely clear an
+    # injury (mark_recovered would otherwise fall back to the single active one).
+    m = re.match(r"my\s+([\w' ]{1,20}?)\s+(?:has\s+|is\s+)?(?:healed|recovered|better)$", text, re.I)
+    if m and len(m.group(1).split()) <= 3:
         return m.group(1).strip()
     m = re.match(r"(?:החלמתי|נרפאתי)\s+(?:מה|מ)?(.+)$", text)
     if m:
@@ -3566,6 +3706,15 @@ def recent_workouts(lang="en"):
         return "השבוע: %d אימונים, אדוני. אחרונים: %s" % (week_count, body)
     return "This week: %d workouts, sir. Recent: %s" % (week_count, body)
 
+# A bare cardio verb ("ran"/"swam"/"רצתי"...) only counts as a workout when it
+# carries workout context (a number, a distance/time unit, or a gym noun) - so
+# "I ran the tests" / "רצתי לחנות" are NOT logged as workouts.
+_WORKOUT_CTX = re.compile(
+    r"\d|\bkm\b|\bk\b|\bmiles?\b|\bmin(?:ute)?s?\b|\bhours?\b|\breps?\b|"
+    r"\bsets?\b|\blaps?\b|\bkg\b|\bmarathon\b|\btreadmill\b|\bpool\b|\bgym\b|"
+    r"ק\"?מ|מטר|דקות|חזרות|סטים|קילומטר|בריכה|מרתון|הקפות",
+    re.IGNORECASE)
+
 def _workout_log_parse(msg):
     if not msg or not isinstance(msg, str):
         return None
@@ -3588,10 +3737,10 @@ def _workout_log_parse(msg):
         rest = m.group(1).strip()
         return ("worked out " + rest) if rest else "worked out"
     m = re.match(r"i\s+(ran|swam|lifted|rowed|cycled|biked|sprinted|jogged)\b\s*(.*)$", text, re.I)
-    if m:
+    if m and _WORKOUT_CTX.search(m.group(2)):
         return (m.group(1) + " " + m.group(2)).strip()
     m = re.match(r"(ran|swam|jogged|sprinted)\b\s+(.+)$", text, re.I)
-    if m:
+    if m and _WORKOUT_CTX.search(m.group(2)):
         return (m.group(1) + " " + m.group(2)).strip()
     m = re.match(r"(?:תרשום|רשום|תעד)\s+(?:לי\s+)?(?:את\s+)?אימון[:\-\s]+(.+)$", text)
     if m:
@@ -3600,7 +3749,7 @@ def _workout_log_parse(msg):
     if m:
         return m.group(1).strip()
     m = re.match(r"(?:רצתי|שחיתי)\s+(.+)$", text)
-    if m:
+    if m and _WORKOUT_CTX.search(m.group(1)):
         return (text).strip()
     m = re.match(r"עשיתי\s+אימון\b[:\-\s]*(.*)$", text)
     if m:
@@ -4068,7 +4217,17 @@ import socket as _v440_socket
 if not getattr(_v440_socket, "_v440_ipv4_patched", False):
     _v440_orig_getaddrinfo = _v440_socket.getaddrinfo
     def _v440_ipv4_only_getaddrinfo(host, port, family=0, type=0, proto=0, flags=0):
-        return _v440_orig_getaddrinfo(host, port, _v440_socket.AF_INET, type, proto, flags)
+        # Prefer IPv4 (local IPv6 routing to Google is broken here), but only
+        # coerce AF_UNSPEC requests, honour an explicit family, and ALWAYS fall
+        # back to a normal resolve if the IPv4-only lookup fails - so genuinely
+        # IPv6-only hosts / explicit AF_INET6 callers still resolve instead of
+        # raising (the old version forced AF_INET unconditionally and lost the
+        # graceful fallback the v4.6 layer provided).
+        fam = _v440_socket.AF_INET if family == 0 else family
+        try:
+            return _v440_orig_getaddrinfo(host, port, fam, type, proto, flags)
+        except _v440_socket.gaierror:
+            return _v440_orig_getaddrinfo(host, port, family, type, proto, flags)
     _v440_socket.getaddrinfo = _v440_ipv4_only_getaddrinfo
     _v440_socket._v440_ipv4_patched = True
 
@@ -4399,65 +4558,75 @@ def think(user_message, memory, lang=""):
     ]
     sys_prompt_plain = JARVIS_SYSTEM_PROMPT + _lang_note + _time_note
     globals()["_last_timer_lang"] = "he" if lang == "he" else "en"
-    if not conversation_history:
-        msg = f"[Memory from past conversations:]\n{memory}\n\n[Current message:]\n{user_message}"
-    else:
-        msg = user_message
-    conversation_history.append({"role": "user", "content": msg})
     tools = [
         {"type": "web_search_20250305", "name": "web_search", "max_uses": 3},
     ] + LOCAL_TOOLS
-    try:
-        for _ in range(5):
-            r = client.messages.create(
-                model="claude-sonnet-4-6", max_tokens=500,
-                system=sys_prompt,
-                messages=conversation_history,
-                tools=tools,
-            )
-            conversation_history.append({"role": "assistant", "content": r.content})
-            if r.stop_reason == "tool_use":
-                tool_results = []
-                for block in r.content:
-                    if getattr(block, "type", None) == "tool_use" and block.name in (
-                            "open_app", "save_note", "calendar_read", "calendar_add",
-                            "calendar_delete", "calendar_update",
-                            "gmail_read", "gmail_spam_review", "gmail_move_spam",
-                            "find_places", "get_directions", "set_timer",
-                            "spotify_play", "spotify_pause", "spotify_next",
-                            "spotify_previous", "spotify_volume", "spotify_now_playing",
-                            "learn_topic", "deep_learn_domain", "resume_learning",
-                            "learning_status", "open_search_panel", "open_worldview",
-                            "open_achilles", "open_roadmap"):
-                        out = run_local_tool(block.name, block.input or {})
-                        tool_results.append({
-                            "type": "tool_result",
-                            "tool_use_id": block.id,
-                            "content": out,
-                        })
-                if tool_results:
-                    conversation_history.append({"role": "user", "content": tool_results})
-                    continue
-                continue
-            parts = [b.text for b in r.content if getattr(b, "type", None) == "text"]
-            reply = " ".join(p.strip() for p in parts if p.strip()).strip()
-            if not reply:
-                reply = "Done, sir."
-            return clean_text(reply)
-        return "I got a bit stuck on that, sir. Could you rephrase?"
-    except Exception as e:
+    # Hold the lock for the whole turn so concurrent callers (voice / Telegram /
+    # the /ask HTTP thread) can never interleave appends into conversation_history.
+    with _think_lock:
+        _normalize_history()
+        if not conversation_history:
+            msg = f"[Memory from past conversations:]\n{memory}\n\n[Current message:]\n{user_message}"
+        else:
+            msg = user_message
+        conversation_history.append({"role": "user", "content": msg})
         try:
-            r = client.messages.create(
-                model="claude-sonnet-4-6", max_tokens=500,
-                system=sys_prompt_plain, messages=conversation_history)
-            reply = r.content[0].text
-            conversation_history.append({"role": "assistant", "content": reply})
-            return clean_text(reply)
-        except Exception as e2:
-            import traceback
-            print("[diag] Brain error full traceback:", flush=True)
-            traceback.print_exc()
-            return f"[Error connecting to Brain: {e2}]"
+            for _ in range(5):
+                r = client.messages.create(
+                    model="claude-sonnet-4-6", max_tokens=1024,
+                    system=sys_prompt,
+                    messages=conversation_history,
+                    tools=tools,
+                )
+                conversation_history.append({"role": "assistant", "content": r.content})
+                if r.stop_reason == "tool_use":
+                    tool_results = []
+                    for block in r.content:
+                        if getattr(block, "type", None) == "tool_use" and block.name in (
+                                "open_app", "save_note", "calendar_read", "calendar_add",
+                                "calendar_delete", "calendar_update",
+                                "gmail_read", "gmail_spam_review", "gmail_move_spam",
+                                "find_places", "get_directions", "set_timer",
+                                "spotify_play", "spotify_pause", "spotify_next",
+                                "spotify_previous", "spotify_volume", "spotify_now_playing",
+                                "learn_topic", "deep_learn_domain", "resume_learning",
+                                "learning_status", "open_search_panel", "open_worldview",
+                                "open_achilles", "open_roadmap"):
+                            out = run_local_tool(block.name, block.input or {})
+                            tool_results.append({
+                                "type": "tool_result",
+                                "tool_use_id": block.id,
+                                "content": out,
+                            })
+                    if tool_results:
+                        conversation_history.append({"role": "user", "content": tool_results})
+                        continue
+                    # tool_use with no matching tool_result would poison the next
+                    # call; drop the orphaned assistant turn before bailing out.
+                    if (conversation_history
+                            and conversation_history[-1].get("role") == "assistant"):
+                        conversation_history.pop()
+                    break
+                parts = [b.text for b in r.content if getattr(b, "type", None) == "text"]
+                reply = " ".join(p.strip() for p in parts if p.strip()).strip()
+                if not reply:
+                    reply = "Done, sir."
+                return clean_text(reply)
+            return "I got a bit stuck on that, sir. Could you rephrase?"
+        except Exception as e:
+            try:
+                _normalize_history()
+                r = client.messages.create(
+                    model="claude-sonnet-4-6", max_tokens=1024,
+                    system=sys_prompt_plain, messages=conversation_history)
+                reply = r.content[0].text
+                conversation_history.append({"role": "assistant", "content": reply})
+                return clean_text(reply)
+            except Exception as e2:
+                import traceback
+                print("[diag] Brain error full traceback:", flush=True)
+                traceback.print_exc()
+                return f"[Error connecting to Brain: {e2}]"
 
 _WMO_WEATHER = {
     0: "clear sky", 1: "mainly clear", 2: "partly cloudy", 3: "overcast",
@@ -4682,7 +4851,17 @@ def set_timer(minutes, label=None):
     if mins <= 0:
         return "The timer needs to be longer than zero, sir."
     secs = mins * 60.0
-    t = threading.Timer(secs, _timer_fire, args=(label, lang))
+    # Self-removing wrapper so fired timers don't leak in _active_timers forever
+    # (only undo used to prune them; normally-elapsed timers stayed referenced).
+    def _fire(_label=label, _lang=lang):
+        try:
+            _timer_fire(_label, _lang)
+        finally:
+            try:
+                _active_timers.remove(t)
+            except ValueError:
+                pass
+    t = threading.Timer(secs, _fire)
     t.daemon = True
     t.start()
     _active_timers.append(t)
@@ -6345,7 +6524,14 @@ class App:
                                 text = transcribe_wake(self.wake_model, "wake_window.wav")
                             except Exception:
                                 text = ""
-                            _hit = (bool(text) and len(text.split()) <= 4 and detect_wake(text))
+                            # Fire whenever a wake word is clearly present. The
+                            # old "<= 4 words" cap silently rejected valid wakes
+                            # when the tiny model expanded the clip into a short
+                            # phrase (e.g. "hey jarvis are you there"); the
+                            # generous cap below still rejects long hallucinated
+                            # runs of speech that merely happen to contain a name.
+                            _hit = (bool(text) and detect_wake(text)
+                                    and len(text.split()) <= 8)
                             if text:
                                 try:
                                     with open("wake_diag.log", "a", encoding="utf-8") as _wf:
@@ -6361,6 +6547,13 @@ class App:
                         time.sleep(WAKE_STEP)
             except Exception as e:
                 print("[diag] wake-loop mic reopen failed, retrying:", repr(e), flush=True)
+                # Surface it: a console-less GUI hides print(), so without this
+                # the wake path can be dead while looking like "not hearing me".
+                try:
+                    self._push("System", "Microphone unavailable - retrying. "
+                               "Close other apps using the mic, sir.")
+                except Exception:
+                    pass
                 time.sleep(0.6)
             if triggered:
                 try:
@@ -6611,49 +6804,62 @@ class App:
         return ImageTk.PhotoImage(img)
 
     def animate(self):
+        # CRITICAL: this method MUST always reschedule itself, or the entire
+        # display loop dies and the orb can never appear again on the next wake
+        # (req_mode would be set to "expanded" but nothing ever applies it).
+        # So the whole body is guarded and the after() reschedule is in finally.
         if self.stop:
             return
-        self._apply_mode()
-        with self._lock:
-            msgs = self.outbox
-            self.outbox = []
-        for m in msgs:
-            txt = m["text"]
-            if len(txt) > 66:
-                txt = txt[:63] + "..."
-            self._hold = txt
-            self._hold_until = time.time() + 4.0
-        st = self.state
-        if st != self.prev:
-            if st == "thinking":
-                self.sel = int(np.random.randint(0, self.N))
-            if st == "speaking":
-                self.ripple = 0.0
-                self.ripple_on = True
-            self.prev = st
-        if self.mode != "expanded":
-            self.root.after(80, self.animate)
-            return
-        Wc = max(self.cv.winfo_width(), 1)
-        Hc = max(self.cv.winfo_height(), 1)
-        now = time.time() * 1000.0
-        if self.use_pil and Wc > 2 and Hc > 2:
-            try:
-                self._tkimg = self._render_bh(Wc, Hc, st, now)
-                self.cv.itemconfig(self.img_id, image=self._tkimg)
-                self.cv.coords(self.img_id, 0, 0)
-            except Exception as e:
-                self.use_pil = False
-                print("PIL render failed, fallback:", e)
-        else:
-            self._render_canvas(Wc, Hc, st, now)
-        self.cv.coords(self.status_id, Wc / 2.0, Hc - 40)
-        self.cv.tag_raise(self.status_id)
-        if self._hold_until > time.time():
-            self.cv.itemconfig(self.status_id, text=self._hold)
-        else:
-            self.cv.itemconfig(self.status_id, text=self.status_text())
-        self.root.after(33, self.animate)
+        delay = 33
+        try:
+            self._apply_mode()
+            with self._lock:
+                msgs = self.outbox
+                self.outbox = []
+            for m in msgs:
+                txt = m["text"]
+                if len(txt) > 66:
+                    txt = txt[:63] + "..."
+                self._hold = txt
+                self._hold_until = time.time() + 4.0
+            st = self.state
+            if st != self.prev:
+                if st == "thinking":
+                    self.sel = int(np.random.randint(0, self.N))
+                if st == "speaking":
+                    self.ripple = 0.0
+                    self.ripple_on = True
+                self.prev = st
+            if self.mode != "expanded":
+                delay = 80
+            else:
+                Wc = max(self.cv.winfo_width(), 1)
+                Hc = max(self.cv.winfo_height(), 1)
+                now = time.time() * 1000.0
+                if self.use_pil and Wc > 2 and Hc > 2:
+                    try:
+                        self._tkimg = self._render_bh(Wc, Hc, st, now)
+                        self.cv.itemconfig(self.img_id, image=self._tkimg)
+                        self.cv.coords(self.img_id, 0, 0)
+                    except Exception as e:
+                        self.use_pil = False
+                        print("PIL render failed, fallback:", e)
+                else:
+                    self._render_canvas(Wc, Hc, st, now)
+                self.cv.coords(self.status_id, Wc / 2.0, Hc - 40)
+                self.cv.tag_raise(self.status_id)
+                if self._hold_until > time.time():
+                    self.cv.itemconfig(self.status_id, text=self._hold)
+                else:
+                    self.cv.itemconfig(self.status_id, text=self.status_text())
+        except Exception as _e:
+            print("[diag] animate frame error (continuing):", repr(_e), flush=True)
+        finally:
+            if not self.stop:
+                try:
+                    self.root.after(delay, self.animate)
+                except Exception:
+                    pass
 
     def _render_canvas(self, Wc, Hc, st, now):
         R = min(Wc, Hc) * 0.30
