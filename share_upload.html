@@ -152,7 +152,8 @@
       setStatus("err", "This browser has no Geolocation API.");
       return;
     }
-    if (location.protocol !== "https:" && location.hostname !== "localhost") {
+    if (location.protocol !== "https:" && location.hostname !== "localhost"
+        && location.hostname !== "127.0.0.1" && location.hostname !== "[::1]") {
       setStatus("err", "Geolocation needs HTTPS. Open the Funnel link, not the LAN address.");
       return;
     }

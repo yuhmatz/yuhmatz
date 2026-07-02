@@ -638,6 +638,7 @@ import time
 import json
 import base64
 import secrets
+import hmac
 import asyncio
 import ctypes
 import datetime
@@ -2455,7 +2456,40 @@ _location_lock = threading.Lock()
 _location_share_started = False
 _location_share_lock = threading.Lock()
 _location_funnel_started = False
+_location_funnel_https = None  # 443 or 8443 once the funnel is configured
 _owner_key_cache = None
+
+# --- basic per-client rate limiting for the ONE public server --------------
+# Fixed window per client: plenty for legit use (the viewer polls every 5s,
+# the phone posts every ~3-5s) yet stops hammering/brute-force scripts.
+# Behind Tailscale Funnel every connection arrives from the local tailscaled,
+# so the real client is taken from X-Forwarded-For (set by the funnel proxy).
+# Trusting that header is safe here BECAUSE the server binds loopback: anyone
+# able to forge it is already local, i.e. the owner.
+_RATE_WINDOW = 10.0   # seconds
+_RATE_MAX = 120       # requests per client per window
+_rate_lock = threading.Lock()
+_rate_buckets = {}    # client -> [window_start, count]
+
+
+def _rate_limited(handler):
+    """True if this request should be rejected with 429."""
+    fwd = handler.headers.get("X-Forwarded-For", "") or ""
+    client = (fwd.split(",")[0].strip() or
+              (handler.client_address[0] if handler.client_address else "?"))
+    now = time.time()
+    with _rate_lock:
+        # keep the table bounded even under address-spoofing floods
+        if len(_rate_buckets) > 4096:
+            for k in [k for k, v in _rate_buckets.items()
+                      if now - v[0] > _RATE_WINDOW]:
+                _rate_buckets.pop(k, None)
+        b = _rate_buckets.get(client)
+        if b is None or now - b[0] > _RATE_WINDOW:
+            _rate_buckets[client] = [now, 1]
+            return False
+        b[1] += 1
+        return b[1] > _RATE_MAX
 
 # Simple "This link has expired" page, served with HTTP 410 Gone.
 _EXPIRED_SHARE_HTML = (
@@ -2582,21 +2616,40 @@ def _create_share_token(minutes):
     return tok
 
 
+def _ct_equal(a, b):
+    """Constant-time string equality (hmac.compare_digest over utf-8 bytes).
+    Never raises on odd input - unequal instead."""
+    try:
+        return hmac.compare_digest(str(a).encode("utf-8"),
+                                    str(b).encode("utf-8"))
+    except Exception:
+        return False
+
+
 def _check_share_token(tok):
-    """Return the token record if present AND unexpired, else None. Prunes an
-    expired token as a side effect so it can never be revived."""
+    """Return the token record if present AND unexpired, else None.
+    Constant-time: the presented value is compared against EVERY stored token
+    with hmac.compare_digest - no dict lookup, no early exit - so response
+    timing cannot narrow a guess. Every expired token seen during the scan is
+    pruned (memory + disk) so it can never be revived."""
     if not tok or not isinstance(tok, str):
         return None
     now = time.time()
     with _location_lock:
-        rec = _share_tokens.get(tok)
-        if not rec:
-            return None
-        if float(rec.get("expires_at", 0)) <= now:
-            _share_tokens.pop(tok, None)
+        match = None
+        expired = []
+        for t, r in _share_tokens.items():
+            if float(r.get("expires_at", 0)) <= now:
+                expired.append(t)
+            elif _ct_equal(tok, t):
+                match = t
+        if expired:
+            for t in expired:
+                _share_tokens.pop(t, None)
             _persist_share_tokens()
+        if match is None:
             return None
-        return dict(rec)
+        return dict(_share_tokens[match])
 
 
 class _LocationShareHandler(http.server.BaseHTTPRequestHandler):
@@ -2680,6 +2733,9 @@ class _LocationShareHandler(http.server.BaseHTTPRequestHandler):
             pass
 
     def do_GET(self):
+        if _rate_limited(self):
+            self._send(429, b"Too many requests")
+            return
         try:
             path = urllib.parse.urlparse(self.path).path
         except Exception:
@@ -2727,7 +2783,7 @@ class _LocationShareHandler(http.server.BaseHTTPRequestHandler):
         # --- owner-only uploader page (my phone) ---------------------------
         if path.startswith("/u/"):
             key = path[len("/u/"):].strip("/")
-            if key and secrets.compare_digest(key, _location_owner_key()):
+            if key and _ct_equal(key, _location_owner_key()):
                 self._serve_static("share_upload.html", self._CSP_UPLOADER)
             else:
                 self._send(404, b"Not found")
@@ -2737,6 +2793,9 @@ class _LocationShareHandler(http.server.BaseHTTPRequestHandler):
         self._send(404, b"Not found")
 
     def do_POST(self):
+        if _rate_limited(self):
+            self._send(429, b"Too many requests")
+            return
         try:
             path = urllib.parse.urlparse(self.path).path
         except Exception:
@@ -2747,14 +2806,17 @@ class _LocationShareHandler(http.server.BaseHTTPRequestHandler):
             return
         # Owner key required - a share-token holder can NOT push fake fixes.
         key = self.headers.get("X-Owner-Key", "") or ""
-        if not (key and secrets.compare_digest(key, _location_owner_key())):
+        if not (key and _ct_equal(key, _location_owner_key())):
             self._send(403, b'{"error":"forbidden"}', "application/json")
             return
         try:
             length = int(self.headers.get("Content-Length", "0") or "0")
         except (TypeError, ValueError):
             length = 0
-        length = max(0, min(length, 10000))
+        if length > 10000:
+            self._send(413, b'{"error":"too large"}', "application/json")
+            return
+        length = max(0, length)
         try:
             raw = self.rfile.read(length) if length else b""
             data = json.loads(raw.decode("utf-8")) if raw else {}
@@ -2836,28 +2898,80 @@ def _funnel_base_url():
             j = json.loads(out.stdout)
             dns = ((j.get("Self") or {}).get("DNSName") or "").strip().rstrip(".")
             if dns:
-                return "https://" + dns
+                base = "https://" + dns
+                if _location_funnel_https and _location_funnel_https != 443:
+                    base += ":%d" % _location_funnel_https
+                return base
     except Exception:
         pass
     return None
 
 
+def _funnel_serve_conflict(https_port, target_port):
+    """Return a description string if HTTPS :https_port on this node already
+    serves something OTHER than our target_port, else None.
+    Guards the documented Windows bug where `tailscale funnel <port>` silently
+    OVERWRITES an existing `tailscale serve` route on the same HTTPS port
+    (breaking private routes and producing 502 circular proxies). We inspect
+    `tailscale serve status --json` first and refuse to clobber."""
+    try:
+        out = subprocess.run(["tailscale", "serve", "status", "--json"],
+                             capture_output=True, text=True, timeout=10)
+        if out.returncode != 0 or not (out.stdout or "").strip():
+            return None  # no config to clobber (fresh node) or can't inspect
+        st = json.loads(out.stdout)
+    except Exception:
+        return None
+    suffix = ":%d" % https_port
+    ours = ":%d" % target_port
+    for hostport, site in (st.get("Web") or {}).items():
+        if not str(hostport).endswith(suffix):
+            continue
+        for hpath, h in ((site or {}).get("Handlers") or {}).items():
+            proxy = str((h or {}).get("Proxy") or "")
+            if proxy and not proxy.rstrip("/").endswith(ours):
+                return "%s already proxies %r -> %r" % (hostport, hpath, proxy)
+    return None
+
+
 def _ensure_location_funnel(port=None):
     """Best-effort: ask Tailscale to Funnel ONLY the share port publicly.
-    Non-fatal if the tailscale CLI is missing - the operator can run
-    `tailscale funnel <port>` manually, or set LOCATION_FUNNEL_DOMAIN."""
-    global _location_funnel_started
+    Tries HTTPS :443 first, falls back to :8443 if :443 is already serving
+    another route (never overwrites - see _funnel_serve_conflict). WorldView
+    on :7777 and the proxy on :7778 are never funneled. Non-fatal if the
+    tailscale CLI is missing - run `tailscale funnel <port>` manually, or set
+    LOCATION_FUNNEL_DOMAIN in .env."""
+    global _location_funnel_started, _location_funnel_https
     if port is None:
         port = _LOCATION_SHARE_PORT
     if _location_funnel_started:
         return
     _location_funnel_started = True
     try:
-        subprocess.run(
-            ["tailscale", "funnel", "--bg", str(port)],
-            capture_output=True, text=True, timeout=20,
-        )
-        print("[diag] tailscale funnel requested for port %d (share only)" % port)
+        for https_port in (443, 8443):
+            conflict = _funnel_serve_conflict(https_port, port)
+            if conflict:
+                print("[diag] tailscale funnel: not touching :%d (%s)"
+                      % (https_port, conflict))
+                continue
+            cmd = ["tailscale", "funnel", "--bg"]
+            if https_port != 443:
+                cmd.append("--https=%d" % https_port)
+            cmd.append(str(port))
+            res = subprocess.run(cmd, capture_output=True, text=True,
+                                 timeout=20)
+            if res.returncode == 0:
+                _location_funnel_https = https_port
+                print("[diag] tailscale funnel active: https :%d -> "
+                      "127.0.0.1:%d (share routes only; :7777/:7778 stay "
+                      "private)" % (https_port, port))
+                return
+            print("[diag] tailscale funnel on :%d failed: %s"
+                  % (https_port,
+                     ((res.stderr or res.stdout or "").strip())[:200]))
+        print("[diag] tailscale funnel NOT configured (no free HTTPS port). "
+              "Run `tailscale funnel --https=8443 %d` manually or set "
+              "LOCATION_FUNNEL_DOMAIN in .env." % port)
     except Exception as e:
         print("[diag] tailscale funnel not started (%r); set "
               "LOCATION_FUNNEL_DOMAIN in .env or run `tailscale funnel %d`"
