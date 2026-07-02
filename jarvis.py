@@ -2478,6 +2478,26 @@ _EXPIRED_SHARE_HTML = (
 ).encode("utf-8")
 
 
+def _write_private(path, text):
+    """Write text to path with owner-only (0600) permissions, so the owner key
+    / active tokens are not readable by other local users on a shared host."""
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(text)
+    except Exception:
+        try:
+            os.close(fd)
+        except OSError:
+            pass
+        raise
+    # Tighten even if the file pre-existed with looser bits.
+    try:
+        os.chmod(path, 0o600)
+    except OSError:
+        pass
+
+
 def _location_owner_key():
     """The secret that gates the uploader page and POST /api/location/update.
     Order: LOCATION_OWNER_KEY from .env, else a generated key persisted to
@@ -2499,8 +2519,7 @@ def _location_owner_key():
     if not k:
         k = secrets.token_urlsafe(24)
         try:
-            with open(_OWNER_KEY_FILE, "w", encoding="utf-8") as f:
-                f.write(k)
+            _write_private(_OWNER_KEY_FILE, k)
         except Exception:
             pass
     _owner_key_cache = k
@@ -2509,16 +2528,14 @@ def _location_owner_key():
 
 def _persist_location_state():
     try:
-        with open(_LOCATION_STATE_FILE, "w", encoding="utf-8") as f:
-            json.dump(_live_location, f)
+        _write_private(_LOCATION_STATE_FILE, json.dumps(_live_location))
     except Exception:
         pass
 
 
 def _persist_share_tokens():
     try:
-        with open(_SHARE_TOKENS_FILE, "w", encoding="utf-8") as f:
-            json.dump(_share_tokens, f)
+        _write_private(_SHARE_TOKENS_FILE, json.dumps(_share_tokens))
     except Exception:
         pass
 
@@ -2587,6 +2604,13 @@ class _LocationShareHandler(http.server.BaseHTTPRequestHandler):
     nothing else, so a share token can never reach an internal endpoint."""
 
     server_version = "share/1.0"
+    sys_version = ""  # never advertise the Python version on the public port
+
+    def version_string(self):
+        # Base class returns "server_version sys_version"; pin it so the public
+        # Server header discloses neither the Python version nor a stray space.
+        return "share/1.0"
+
     # This is the one PUBLICLY reachable server, so slow/partial requests must
     # not pin worker threads forever (slowloris). BaseHTTPRequestHandler
     # applies this as the per-connection socket timeout.
@@ -2674,13 +2698,27 @@ class _LocationShareHandler(http.server.BaseHTTPRequestHandler):
         # --- public live-location API (lat/lon/updated_at ONLY) ------------
         if path.startswith("/api/share/") and path.endswith("/location"):
             tok = path[len("/api/share/"):-len("/location")].strip("/")
-            if _check_share_token(tok):
+            rec = _check_share_token(tok)
+            if rec:
                 with _location_lock:
-                    payload = json.dumps({
-                        "lat": _live_location.get("lat"),
-                        "lon": _live_location.get("lon"),
-                        "updated_at": _live_location.get("updated_at"),
-                    }).encode("utf-8")
+                    lat = _live_location.get("lat")
+                    lon = _live_location.get("lon")
+                    ua = _live_location.get("updated_at")
+                # A share exposes ONLY fixes from its own lifetime (plus a
+                # short backward slack for "already broadcasting, then
+                # shared"). A position persisted before this share existed -
+                # e.g. yesterday's, restored from disk at startup - is never
+                # revealed to a new recipient; the viewer shows "waiting for
+                # a location fix" until a live one arrives.
+                try:
+                    fresh_since = float(rec.get("created_at", 0)) - 120.0
+                except (TypeError, ValueError):
+                    fresh_since = time.time()
+                if ua is None or float(ua) < fresh_since:
+                    lat = lon = ua = None
+                payload = json.dumps({
+                    "lat": lat, "lon": lon, "updated_at": ua,
+                }).encode("utf-8")
                 self._send(200, payload, "application/json")
             else:
                 self._send(410, b'{"error":"expired"}', "application/json")
