@@ -1,7 +1,7 @@
 """
 JARVIS v3.0 — voice assistant: bilingual, web search, tools, red-orange orb
 ============================================================================
-(Version is updated by hand on each change. Current: v4.67 — 30 Jun 2026.)
+(Version is updated by hand on each change. Current: v4.74 — 2 Jul 2026.)
 
 What works now:
   * Wake word "Hey JARVIS" (continuous background listening); empty screen until
@@ -21,6 +21,14 @@ What works now:
     runs cleanly when launched from start_jarvis.bat (double-click).
 
 Changelog:
+  v4.74 - WAKE/DISPLAY fix: the floating orb never appeared when invoked.
+          The v4.70 Vosk wake engine returned early (leaving the wake path
+          dead) whenever Vosk was not installed or its model could not load,
+          and since the orb is hidden after boot it could then never pop on
+          the wake word - so activation produced an empty screen. _wake_loop
+          now falls back to the Whisper wake engine (the proven v4.67 path,
+          reusing the already-loaded self.wake_model) instead of returning,
+          so saying the wake word always pops the orb even without Vosk.
   v4.67 - Reliability + safety pass. WAKE: transcribe_wake no longer
           stacks VAD + double no-speech filtering, which on the tiny
           model trimmed a short isolated "Achilles"/"Jarvis" to an empty
@@ -7991,13 +7999,33 @@ class App:
             # v4.67: apply on the main thread right now so the visual feedback
             # (the orb) pops the instant the wake fires, not on the next tick.
             try:
-                self.ui(self._apply_mode)
+                self.ui(self._force_show)
             except Exception:
                 pass
 
     def _hide(self):
         self.req_typing = False
         self.req_mode = "hidden"
+
+    def _force_show(self):
+        # v4.71: guard-free, unconditional re-show for the wake path. animate()'s
+        # _apply_mode only reacts to a req_mode!=mode transition; if self.mode ever
+        # desyncs from the real window state (it did after a hide/show cycle), the
+        # orb stayed withdrawn on the next wake even though req_mode was "expanded".
+        # This forces the window visible and to the front every time, and is safe
+        # because it only runs on wake (not on every animation tick).
+        self.mode = "expanded"
+        self.req_mode = "expanded"
+        try:
+            self.root.deiconify()
+            self.root.lift()
+            # topmost off->on forces Windows to restack it above other windows,
+            # fixing "deiconified but hidden behind something" on repeat wakes.
+            self.root.attributes("-topmost", False)
+            self.root.attributes("-topmost", True)
+            self.root.update_idletasks()
+        except Exception:
+            pass
 
     def _apply_mode(self):
         if self.req_mode != self.mode:
@@ -8318,7 +8346,7 @@ class App:
             self.state = "speaking"
             speak(brief)
             time.sleep(min(14.0, max(3.0, len(brief.split()) * 0.45)))
-            return True  # keep the conversation open for follow-ups
+            return False  # v4.72: end after the briefing; wake again for more
         # Graceful goodbye: if the user is clearly ending the chat, give a short
         # sign-off (in their language) instead of silently closing.
         if detect_goodbye(user_text):
@@ -8352,7 +8380,9 @@ class App:
         self.state = "speaking"
         speak(reply)
         time.sleep(min(12.0, max(2.0, len(reply.split()) * 0.45)))
-        return not end_now  # end the conversation if the brain signalled dismissal
+        return False  # v4.72: one command per wake - end after answering so
+        # background noise can't trip an endless follow-up/hallucinate loop.
+        # (Say the wake word again for another command; it's instant now.)
 
     def _typed_turn(self, text):
         try:
@@ -8492,6 +8522,127 @@ class App:
                     pass
 
     def _wake_loop(self):
+        # v4.70: Vosk streaming wake detection (replaces the Whisper wake path).
+        # A small en-us model with a fixed grammar recognizes the wake word
+        # reliably and near-instantly, with essentially no hallucinated
+        # false-fires. The model is loaded once and cached locally.
+        try:
+            import queue as _queue
+            from vosk import Model as _VoskModel, KaldiRecognizer as _KaldiRec
+        except Exception as e:
+            # v4.74: Vosk unavailable -> DON'T leave the orb un-poppable. Fall
+            # back to the Whisper wake engine (the proven v4.67 path) so saying
+            # the wake word still pops the orb. Before this fix a missing Vosk
+            # install returned here and the orb, hidden after boot, could never
+            # reappear on wake -> the reported "floating orb never appears when
+            # invoked". self.wake_model (Whisper "tiny") is already loaded at boot.
+            print("[diag] Vosk import failed, falling back to Whisper wake:",
+                  repr(e), flush=True)
+            try:
+                self._push("System", "Using Whisper wake engine, sir.")
+            except Exception:
+                pass
+            self._wake_loop_whisper()
+            return
+        try:
+            _vmodel = _VoskModel(lang="en-us")
+        except Exception as e:
+            # v4.74: same fallback if the Vosk model can't be downloaded/loaded,
+            # so activation (and therefore the orb) never silently dies.
+            print("[diag] Vosk model load failed, falling back to Whisper wake:",
+                  repr(e), flush=True)
+            try:
+                self._push("System", "Using Whisper wake engine, sir.")
+            except Exception:
+                pass
+            self._wake_loop_whisper()
+            return
+        _GRAMMAR = '["achilles", "hey achilles", "[unk]"]'
+        pre_len = int(SAMPLE_RATE * PREROLL_SEC)
+        blk = int(SAMPLE_RATE * 0.15)
+        print("[wake] Vosk wake engine ready (say 'Achilles').", flush=True)
+
+        while not self.stop:
+            if not self.wake_on or self.busy:
+                time.sleep(0.2)
+                continue
+            rec = _KaldiRec(_vmodel, SAMPLE_RATE, _GRAMMAR)
+            rec.SetWords(True)
+            q = _queue.Queue()
+            pre = {"buf": np.zeros(pre_len, dtype=np.float32)}
+
+            def cb(indata, frames, t_info, status, _q=q, _pre=pre):
+                x = indata[:, 0]
+                _q.put((np.clip(x, -1.0, 1.0) * 32767.0).astype(np.int16).tobytes())
+                n = len(x)
+                b = _pre["buf"]
+                b = np.roll(b, -n)
+                b[-n:] = x
+                _pre["buf"] = b
+
+            triggered = False
+            try:
+                with sd.InputStream(samplerate=SAMPLE_RATE, channels=1,
+                                    dtype='float32', blocksize=blk, callback=cb):
+                    while not self.stop and self.wake_on and not self.busy:
+                        try:
+                            data = q.get(timeout=0.3)
+                        except _queue.Empty:
+                            continue
+                        hit = False
+                        if rec.AcceptWaveform(data):
+                            # v4.73: fire ONLY on a finalized segment that is
+                            # cleanly the wake word - "achilles" present, NO
+                            # out-of-vocabulary "[unk]" token mixed in, and
+                            # short. Background video/music decodes as runs of
+                            # "[unk]", so this rejects the false-fire storm.
+                            _res = json.loads(rec.Result())
+                            _txt = _res.get("text", "").strip()
+                            _toks = _txt.split()
+                            hit = ("achilles" in _toks and "[unk]" not in _toks
+                                   and 1 <= len(_toks) <= 6)
+                            if _txt:
+                                _cf = [w.get("conf", 1.0)
+                                       for w in _res.get("result", [])
+                                       if w.get("word") == "achilles"]
+                                _mc = min(_cf) if _cf else 1.0
+                                try:
+                                    with open("wake_diag.log", "a", encoding="utf-8") as _wf:
+                                        _wf.write("[heard] vosk final=%r conf=%.2f wake=%s\n"
+                                                  % (_txt, _mc, hit))
+                                except Exception:
+                                    pass
+                        # partials are intentionally ignored now (they
+                        # fluctuate and caused constant false triggers).
+                        if hit:
+                            triggered = True
+                            self._preroll = pre["buf"].copy()
+                            break
+            except Exception as e:
+                print("[diag] wake-loop mic reopen failed, retrying:", repr(e), flush=True)
+                try:
+                    self._push("System", "Microphone unavailable - retrying. "
+                               "Close other apps using the mic, sir.")
+                except Exception:
+                    pass
+                time.sleep(0.6)
+            if triggered:
+                try:
+                    with open("wake_diag.log", "a", encoding="utf-8") as _wf:
+                        _wf.write("[trigger] firing _turn\n")
+                except Exception:
+                    pass
+                self._push("System", "Wake word detected.")
+                self._face_req()
+                self._turn(True, collapse_after=True)
+                time.sleep(0.6)
+
+    def _wake_loop_whisper(self):
+        # v4.74: Whisper-based wake fallback (the v4.67 engine), used when Vosk
+        # is not installed or its model can't load. Uses the already-loaded
+        # self.wake_model ("tiny") + WAKE_GATE + detect_wake(); on a hit it pops
+        # the orb via _face_req() and runs one turn, exactly like the Vosk path.
+        print("[wake] Whisper wake engine ready (say the wake word).", flush=True)
         ring_len = int(SAMPLE_RATE * WAKE_WINDOW)
         block = int(SAMPLE_RATE * 0.1)
         while not self.stop:
@@ -8524,38 +8675,29 @@ class App:
                                 text = transcribe_wake(self.wake_model, "wake_window.wav")
                             except Exception:
                                 text = ""
-                            # v4.67: fire whenever a wake word is clearly present.
-                            # The old "<= 4 words" cap silently rejected valid
-                            # wakes when the tiny model expanded the clip into a
-                            # short phrase ("hey jarvis are you there"); the more
-                            # generous <= 8 cap still rejects long hallucinated
-                            # runs of speech that merely happen to contain a name.
                             _hit = (bool(text) and detect_wake(text)
                                     and len(text.split()) <= 8)
                             if text:
                                 try:
                                     with open("wake_diag.log", "a", encoding="utf-8") as _wf:
-                                        _wf.write("[heard] %r match=%s\n" % (text, _hit))
+                                        _wf.write("[heard] whisper %r match=%s\n" % (text, _hit))
                                 except Exception:
                                     pass
                             if _hit:
                                 triggered = True
-                                # grab the tail of the ring buffer as pre-roll,
-                                # so the first command word (already spoken in
-                                # the same breath) isn't lost.
+                                # tail of the ring as pre-roll so the first
+                                # command word (same breath) isn't lost.
                                 with lock:
                                     tail = ring["buf"][-int(SAMPLE_RATE * PREROLL_SEC):].copy()
                                 self._preroll = tail
                                 break
                         time.sleep(WAKE_STEP)
             except Exception as e:
-                # The mic device may briefly be busy (just released by a
-                # conversation). Print it so a real problem is visible, then
-                # back off and retry rather than dying quietly.
-                print("[diag] wake-loop mic reopen failed, retrying:", repr(e), flush=True)
-                # v4.67: also surface it - a console-less GUI hides print(), so
-                # without this the wake path can be dead while looking like
-                # "just not hearing me".
+                # Mic may be briefly busy (just released by a conversation).
+                # Surface it (a console-less GUI hides print()) then back off and
+                # retry instead of dying quietly.
+                print("[diag] whisper wake-loop mic reopen failed, retrying:",
+                      repr(e), flush=True)
                 try:
                     self._push("System", "Microphone unavailable - retrying. "
                                "Close other apps using the mic, sir.")
@@ -8565,16 +8707,15 @@ class App:
             if triggered:
                 try:
                     with open("wake_diag.log", "a", encoding="utf-8") as _wf:
-                        _wf.write("[trigger] firing _turn\n")
+                        _wf.write("[trigger] firing _turn (whisper)\n")
                 except Exception:
                     pass
                 self._push("System", "Wake word detected.")
                 self._face_req()
                 self._turn(True, collapse_after=True)
-                # Settle: the conversation just released the mic. Give Windows a
-                # moment to free the audio device before we re-open it for wake
-                # detection. Without this, the next InputStream open could fail
-                # and JARVIS would silently stop hearing "Hey JARVIS".
+                # Settle: give the OS a moment to free the audio device before we
+                # re-open it, or the next InputStream open can fail and the wake
+                # path goes silently deaf.
                 time.sleep(0.6)
 
     # ---- Pillow renderer ----
@@ -8894,7 +9035,7 @@ class App:
 
                 if self.use_pil and Wc > 2 and Hc > 2:
                     try:
-                        self._tkimg = self._render_bh(Wc, Hc, st, now)
+                        self._tkimg = self._render_pil(Wc, Hc, st, now)  # v4.69: orange dot-orb is the base face
                         self.cv.itemconfig(self.img_id, image=self._tkimg)
                         self.cv.coords(self.img_id, 0, 0)
                     except Exception as e:
