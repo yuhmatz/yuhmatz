@@ -637,6 +637,7 @@ import re
 import time
 import json
 import base64
+import secrets
 import asyncio
 import ctypes
 import datetime
@@ -2412,6 +2413,489 @@ def _start_flights_proxy(port=7778):
         return True
 
 
+# ===========================================================================
+# SECURE TEMPORARY LIVE LOCATION SHARING (v4.68)
+# ---------------------------------------------------------------------------
+# A completely SEPARATE, minimal HTTP server (default 127.0.0.1:7779) whose
+# handler defines ONLY the sharing/upload routes. There is deliberately NO
+# code path from a share token to /keys, /flights, /vessels, /state or any
+# other internal API - isolation is enforced by architecture, not by
+# filtering. This is the ONLY server that gets exposed publicly through
+# Tailscale Funnel (which proxies to 127.0.0.1, so a loopback bind keeps
+# even the LAN out); :7777 (WorldView) and :7778 (flights/vessels/keys)
+# stay private on the Tailnet.
+#
+#   GET  /share/<token>              -> share_location.html   (410 if expired)
+#   GET  /api/share/<token>/location -> {lat, lon, updated_at} (410 if expired)
+#   GET  /u/<owner_key>              -> share_upload.html      (owner only)
+#   POST /api/location/update        -> store live fix (owner key required)
+#
+# The recipient can ONLY read live coordinates while the token is valid.
+# ===========================================================================
+_LOCATION_DIR = Path(__file__).resolve().parent
+_LOCATION_STATE_FILE = str(_LOCATION_DIR / "location_state.json")
+_SHARE_TOKENS_FILE = str(_LOCATION_DIR / "share_tokens.json")
+_OWNER_KEY_FILE = str(_LOCATION_DIR / "location_owner_key.txt")
+try:
+    _LOCATION_SHARE_PORT = int(os.environ.get("LOCATION_SHARE_PORT", "7779"))
+except Exception:
+    _LOCATION_SHARE_PORT = 7779
+# Loopback by default: Tailscale Funnel/serve proxies to 127.0.0.1, so the
+# public HTTPS path still works while plain-LAN clients can't even connect.
+_LOCATION_SHARE_BIND = (os.environ.get("LOCATION_SHARE_BIND") or "127.0.0.1").strip()
+
+# Most recent live fix. Persisted to location_state.json so a restart keeps
+# the last position until the phone pushes a fresh one.
+_live_location = {"lat": None, "lon": None, "accuracy": None, "updated_at": None}
+# token -> {"created_at": float, "expires_at": float}. Persisted so an active
+# share survives a JARVIS restart.
+_share_tokens = {}
+_location_lock = threading.Lock()
+
+_location_share_started = False
+_location_share_lock = threading.Lock()
+_location_funnel_started = False
+_owner_key_cache = None
+
+# Simple "This link has expired" page, served with HTTP 410 Gone.
+_EXPIRED_SHARE_HTML = (
+    "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\">"
+    "<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">"
+    "<title>Link expired</title><style>"
+    "html,body{height:100%;margin:0}"
+    "body{display:flex;align-items:center;justify-content:center;"
+    "font-family:-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;"
+    "background:#0b0f14;color:#e6edf3}"
+    ".card{max-width:340px;padding:32px;text-align:center}"
+    ".card h1{font-size:22px;margin:0 0 10px}"
+    ".card p{color:#8b98a5;line-height:1.5;margin:0}"
+    ".dot{font-size:44px;margin-bottom:8px}"
+    "</style></head><body><div class=\"card\">"
+    "<div class=\"dot\">\U0001F512</div>"
+    "<h1>This link has expired</h1>"
+    "<p>The live location share you are trying to open is no longer active.</p>"
+    "</div></body></html>"
+).encode("utf-8")
+
+
+def _location_owner_key():
+    """The secret that gates the uploader page and POST /api/location/update.
+    Order: LOCATION_OWNER_KEY from .env, else a generated key persisted to
+    location_owner_key.txt (gitignored). Cached after first resolution.
+    To ROTATE a leaked key: delete location_owner_key.txt (or change the env
+    var) and restart JARVIS - a fresh key is minted and the old uploader
+    links stop working."""
+    global _owner_key_cache
+    if _owner_key_cache:
+        return _owner_key_cache
+    k = (os.environ.get("LOCATION_OWNER_KEY") or "").strip()
+    if not k:
+        try:
+            if os.path.exists(_OWNER_KEY_FILE):
+                with open(_OWNER_KEY_FILE, "r", encoding="utf-8") as f:
+                    k = (f.read() or "").strip()
+        except Exception:
+            k = ""
+    if not k:
+        k = secrets.token_urlsafe(24)
+        try:
+            with open(_OWNER_KEY_FILE, "w", encoding="utf-8") as f:
+                f.write(k)
+        except Exception:
+            pass
+    _owner_key_cache = k
+    return k
+
+
+def _persist_location_state():
+    try:
+        with open(_LOCATION_STATE_FILE, "w", encoding="utf-8") as f:
+            json.dump(_live_location, f)
+    except Exception:
+        pass
+
+
+def _persist_share_tokens():
+    try:
+        with open(_SHARE_TOKENS_FILE, "w", encoding="utf-8") as f:
+            json.dump(_share_tokens, f)
+    except Exception:
+        pass
+
+
+def _load_location_persisted():
+    """Load last fix + still-valid tokens from disk. Called once at startup."""
+    global _share_tokens
+    try:
+        if os.path.exists(_LOCATION_STATE_FILE):
+            with open(_LOCATION_STATE_FILE, "r", encoding="utf-8") as f:
+                d = json.load(f)
+            if isinstance(d, dict):
+                for key in ("lat", "lon", "accuracy", "updated_at"):
+                    if key in d:
+                        _live_location[key] = d[key]
+    except Exception:
+        pass
+    try:
+        if os.path.exists(_SHARE_TOKENS_FILE):
+            with open(_SHARE_TOKENS_FILE, "r", encoding="utf-8") as f:
+                d = json.load(f)
+            if isinstance(d, dict):
+                now = time.time()
+                _share_tokens = {
+                    t: r for t, r in d.items()
+                    if isinstance(r, dict) and float(r.get("expires_at", 0)) > now
+                }
+    except Exception:
+        pass
+
+
+def _create_share_token(minutes):
+    """Mint a cryptographically-secure token valid for `minutes` minutes."""
+    now = time.time()
+    tok = secrets.token_urlsafe(24)
+    with _location_lock:
+        _share_tokens[tok] = {"created_at": now,
+                              "expires_at": now + minutes * 60.0}
+        # opportunistic prune of anything already expired
+        for t in [t for t, r in _share_tokens.items()
+                  if float(r.get("expires_at", 0)) <= now]:
+            _share_tokens.pop(t, None)
+        _persist_share_tokens()
+    return tok
+
+
+def _check_share_token(tok):
+    """Return the token record if present AND unexpired, else None. Prunes an
+    expired token as a side effect so it can never be revived."""
+    if not tok or not isinstance(tok, str):
+        return None
+    now = time.time()
+    with _location_lock:
+        rec = _share_tokens.get(tok)
+        if not rec:
+            return None
+        if float(rec.get("expires_at", 0)) <= now:
+            _share_tokens.pop(tok, None)
+            _persist_share_tokens()
+            return None
+        return dict(rec)
+
+
+class _LocationShareHandler(http.server.BaseHTTPRequestHandler):
+    """The ONLY public surface. Defines exactly the sharing/upload routes and
+    nothing else, so a share token can never reach an internal endpoint."""
+
+    server_version = "share/1.0"
+    # This is the one PUBLICLY reachable server, so slow/partial requests must
+    # not pin worker threads forever (slowloris). BaseHTTPRequestHandler
+    # applies this as the per-connection socket timeout.
+    timeout = 20
+
+    # Both HTML pages are served BY this server, so every fetch they make is
+    # same-origin: no CORS headers are needed, and none are sent - a foreign
+    # web page gets nothing readable out of these endpoints.
+    # Per-page Content-Security-Policy (belt over the SRI suspenders): even a
+    # compromised CDN script could not exfiltrate the token/coordinates to an
+    # attacker host, because connect-src/img-src only allow the tile servers.
+    _CSP_VIEWER = ("default-src 'none'; base-uri 'none'; form-action 'none'; "
+                   "frame-ancestors 'none'; "
+                   "script-src 'unsafe-inline' https://unpkg.com; "
+                   "style-src 'unsafe-inline' https://unpkg.com; "
+                   "img-src data: blob: https://*.tile.openstreetmap.org "
+                   "https://server.arcgisonline.com; "
+                   "connect-src 'self' https://*.tile.openstreetmap.org "
+                   "https://server.arcgisonline.com; "
+                   "worker-src blob:; child-src blob:")
+    _CSP_UPLOADER = ("default-src 'none'; base-uri 'none'; form-action 'none'; "
+                     "frame-ancestors 'none'; "
+                     "script-src 'unsafe-inline'; style-src 'unsafe-inline'; "
+                     "connect-src 'self'")
+    _CSP_PLAIN = ("default-src 'none'; base-uri 'none'; form-action 'none'; "
+                  "frame-ancestors 'none'; style-src 'unsafe-inline'")
+
+    def _sec_headers(self, csp=None):
+        self.send_header("Cache-Control", "no-store")
+        # Lock the page down: no sniffing, no framing, no referrer leakage
+        # of the token to tile servers / CDNs / navigation targets.
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.send_header("X-Frame-Options", "DENY")
+        self.send_header("Referrer-Policy", "no-referrer")
+        self.send_header("Content-Security-Policy", csp or self._CSP_PLAIN)
+
+    def _send(self, code, body=b"", ctype="text/plain; charset=utf-8",
+              csp=None):
+        try:
+            self.send_response(code)
+            self.send_header("Content-Type", ctype)
+            self._sec_headers(csp)
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            if body:
+                self.wfile.write(body)
+        except Exception:
+            pass
+
+    def _serve_static(self, filename, csp):
+        # Fixed filenames only - never a path derived from the request, so
+        # directory traversal is impossible.
+        try:
+            body = (_LOCATION_DIR / filename).read_bytes()
+        except Exception:
+            self._send(500, b"error")
+            return
+        self._send(200, body, "text/html; charset=utf-8", csp=csp)
+
+    def do_OPTIONS(self):
+        try:
+            self.send_response(204)
+            self.send_header("Allow", "GET, POST, OPTIONS")
+            self._sec_headers()
+            self.end_headers()
+        except Exception:
+            pass
+
+    def do_GET(self):
+        try:
+            path = urllib.parse.urlparse(self.path).path
+        except Exception:
+            self._send(400, b"bad request")
+            return
+
+        # --- public share page ---------------------------------------------
+        if path.startswith("/share/"):
+            tok = path[len("/share/"):].strip("/")
+            if _check_share_token(tok):
+                self._serve_static("share_location.html", self._CSP_VIEWER)
+            else:
+                self._send(410, _EXPIRED_SHARE_HTML, "text/html; charset=utf-8")
+            return
+
+        # --- public live-location API (lat/lon/updated_at ONLY) ------------
+        if path.startswith("/api/share/") and path.endswith("/location"):
+            tok = path[len("/api/share/"):-len("/location")].strip("/")
+            if _check_share_token(tok):
+                with _location_lock:
+                    payload = json.dumps({
+                        "lat": _live_location.get("lat"),
+                        "lon": _live_location.get("lon"),
+                        "updated_at": _live_location.get("updated_at"),
+                    }).encode("utf-8")
+                self._send(200, payload, "application/json")
+            else:
+                self._send(410, b'{"error":"expired"}', "application/json")
+            return
+
+        # --- owner-only uploader page (my phone) ---------------------------
+        if path.startswith("/u/"):
+            key = path[len("/u/"):].strip("/")
+            if key and secrets.compare_digest(key, _location_owner_key()):
+                self._serve_static("share_upload.html", self._CSP_UPLOADER)
+            else:
+                self._send(404, b"Not found")
+            return
+
+        # Everything else is invisible. No /keys, no /flights, no /vessels.
+        self._send(404, b"Not found")
+
+    def do_POST(self):
+        try:
+            path = urllib.parse.urlparse(self.path).path
+        except Exception:
+            self._send(400, b"bad request")
+            return
+        if path != "/api/location/update":
+            self._send(404, b"Not found")
+            return
+        # Owner key required - a share-token holder can NOT push fake fixes.
+        key = self.headers.get("X-Owner-Key", "") or ""
+        if not (key and secrets.compare_digest(key, _location_owner_key())):
+            self._send(403, b'{"error":"forbidden"}', "application/json")
+            return
+        try:
+            length = int(self.headers.get("Content-Length", "0") or "0")
+        except (TypeError, ValueError):
+            length = 0
+        length = max(0, min(length, 10000))
+        try:
+            raw = self.rfile.read(length) if length else b""
+            data = json.loads(raw.decode("utf-8")) if raw else {}
+            lat = float(data["lat"])
+            lon = float(data["lon"])
+            if not (-90.0 <= lat <= 90.0 and -180.0 <= lon <= 180.0):
+                raise ValueError("coordinates out of range")
+            acc = data.get("accuracy")
+            try:
+                acc = float(acc) if acc is not None else None
+            except (TypeError, ValueError):
+                acc = None
+            with _location_lock:
+                _live_location["lat"] = lat
+                _live_location["lon"] = lon
+                _live_location["accuracy"] = acc
+                _live_location["updated_at"] = time.time()
+                _persist_location_state()
+            self._send(200, b'{"ok":true}', "application/json")
+        except Exception:
+            self._send(400, b'{"ok":false}', "application/json")
+
+    # silence per-request access logs
+    def log_message(self, *args, **kwargs):
+        pass
+
+
+def _start_location_share_server(port=None):
+    """Start the isolated location-share server on a daemon thread. Idempotent.
+    Returns True if it is (now) listening, False if the bind failed."""
+    global _location_share_started
+    if port is None:
+        port = _LOCATION_SHARE_PORT
+    with _location_share_lock:
+        if _location_share_started:
+            return True
+        _load_location_persisted()
+        owner_key = _location_owner_key()
+        try:
+            server = http.server.ThreadingHTTPServer(
+                (_LOCATION_SHARE_BIND, port), _LocationShareHandler
+            )
+        except OSError as e:
+            print("[diag] location share server could not bind to %s:%d: %r"
+                  % (_LOCATION_SHARE_BIND, port, e))
+            return False
+        threading.Thread(
+            target=server.serve_forever, daemon=True,
+            name="jarvis-location-share",
+        ).start()
+        _location_share_started = True
+        print("[diag] location share server listening on %s:%d"
+              % (_LOCATION_SHARE_BIND, port))
+        # Never print the full owner key: stdout can end up in captured logs.
+        # The full uploader URL reaches the owner over the paired Telegram
+        # chat (share_live_location) and lives in location_owner_key.txt.
+        print("[diag] location uploader ready at /u/%s... (key redacted; "
+              "full link arrives via Telegram)" % owner_key[:6])
+        return True
+
+
+def _funnel_base_url():
+    """Best-effort public HTTPS base URL for the share links. Order:
+    LOCATION_FUNNEL_DOMAIN / FUNNEL_DOMAIN in .env, else the MagicDNS name
+    from `tailscale status --json`. Returns None if it cannot be determined."""
+    d = (os.environ.get("LOCATION_FUNNEL_DOMAIN")
+         or os.environ.get("FUNNEL_DOMAIN") or "").strip()
+    if d:
+        d = d.rstrip("/")
+        if not d.startswith("http"):
+            d = "https://" + d
+        return d
+    try:
+        out = subprocess.run(
+            ["tailscale", "status", "--json"],
+            capture_output=True, text=True, timeout=6,
+        )
+        if out.returncode == 0 and out.stdout:
+            j = json.loads(out.stdout)
+            dns = ((j.get("Self") or {}).get("DNSName") or "").strip().rstrip(".")
+            if dns:
+                return "https://" + dns
+    except Exception:
+        pass
+    return None
+
+
+def _ensure_location_funnel(port=None):
+    """Best-effort: ask Tailscale to Funnel ONLY the share port publicly.
+    Non-fatal if the tailscale CLI is missing - the operator can run
+    `tailscale funnel <port>` manually, or set LOCATION_FUNNEL_DOMAIN."""
+    global _location_funnel_started
+    if port is None:
+        port = _LOCATION_SHARE_PORT
+    if _location_funnel_started:
+        return
+    _location_funnel_started = True
+    try:
+        subprocess.run(
+            ["tailscale", "funnel", "--bg", str(port)],
+            capture_output=True, text=True, timeout=20,
+        )
+        print("[diag] tailscale funnel requested for port %d (share only)" % port)
+    except Exception as e:
+        print("[diag] tailscale funnel not started (%r); set "
+              "LOCATION_FUNNEL_DOMAIN in .env or run `tailscale funnel %d`"
+              % (e, port))
+
+
+def _ensure_location_sharing():
+    """Bring up the share server + public Funnel exposure. Idempotent."""
+    ok = _start_location_share_server()
+    _ensure_location_funnel()
+    return ok
+
+
+def share_live_location(minutes=15):
+    """Voice tool: mint a secure temporary link to the user's LIVE location and
+    send it to the user's brother over Telegram. Exposes ONLY live coordinates
+    while the token is valid; everything else stays private."""
+    try:
+        minutes = int(round(float(minutes)))
+    except Exception:
+        minutes = 15
+    minutes = max(1, min(minutes, 24 * 60))  # clamp 1 min .. 24 h
+
+    _ensure_location_sharing()
+    tok = _create_share_token(minutes)
+    base = _funnel_base_url()
+    owner_key = _location_owner_key()
+    if base:
+        share_url = "%s/share/%s" % (base, tok)
+        upload_url = "%s/u/%s" % (base, owner_key)
+    else:
+        share_url = "http://localhost:%d/share/%s" % (_LOCATION_SHARE_PORT, tok)
+        upload_url = "http://localhost:%d/u/%s" % (_LOCATION_SHARE_PORT, owner_key)
+
+    with _location_lock:
+        last = _live_location.get("updated_at")
+    has_fresh_fix = bool(last) and (time.time() - float(last)) < 120
+
+    # 3) send the public share URL to the brother via Telegram.
+    brother = (os.environ.get("BROTHER_TELEGRAM_CHAT_ID") or "").strip()
+    sent_to_brother = False
+    if brother:
+        sent_to_brother = telegram_send(
+            "\U0001F4CD Live location — expires in %d min:\n%s"
+            % (minutes, share_url),
+            chat_id=brother,
+        )
+
+    # Nudge the owner's paired chat: the uploader link (so the phone starts
+    # broadcasting) and/or the share link to forward if no brother is set.
+    owner_lines = []
+    if not sent_to_brother:
+        owner_lines.append("Forward to your brother (%d min): %s"
+                           % (minutes, share_url))
+    if not has_fresh_fix:
+        owner_lines.append("Open this on your phone to start broadcasting your "
+                           "location:\n" + upload_url)
+    if owner_lines:
+        telegram_send("\n\n".join(owner_lines))
+
+    # Spoken confirmation for the brain to phrase naturally.
+    if not base:
+        return ("I generated a %d-minute share link, sir, but no public Funnel "
+                "domain is configured. Set LOCATION_FUNNEL_DOMAIN in the .env, "
+                "or enable Tailscale Funnel on port %d. The link is %s"
+                % (minutes, _LOCATION_SHARE_PORT, share_url))
+    if sent_to_brother:
+        tail = ("" if has_fresh_fix else " I've also sent you the uploader link "
+                "— open it on your phone to start broadcasting.")
+        return ("Done, sir. Your brother now has a live location link that "
+                "expires in %d minutes.%s" % (minutes, tail))
+    return ("I created a %d-minute link and sent it to you to forward, sir. "
+            "Set BROTHER_TELEGRAM_CHAT_ID in the .env and I'll send it to your "
+            "brother automatically next time." % minutes)
+
+
 def _ensure_worldview_server(files_dir, port=7777):
     """Ensure a local HTTP server is serving WorldView at 127.0.0.1:port.
     Starts python -m http.server in the background if nothing is listening yet.
@@ -3445,6 +3929,26 @@ LOCAL_TOOLS = [
                       "description": "core = black hole, solar = solar system, todo = task list"}
         }},
     },
+    {
+        "name": "share_live_location",
+        "description": ("Create a SECURE, TEMPORARY public link to the user's "
+                        "LIVE location and send it to the user's brother over "
+                        "Telegram. Use when the user asks to share/send their "
+                        "live location or 'where I am' for some minutes, e.g. "
+                        "'share my location for 15 minutes', 'send my brother my "
+                        "live location for half an hour'. Hebrew triggers include "
+                        "'שתף את המיקום "
+                        "שלי', 'תשלח לאח "
+                        "שלי את המיקום', "
+                        "'שתף מיקום ל-15 "
+                        "דקות'. The link expires automatically "
+                        "and reveals ONLY the live coordinates - no other app "
+                        "data. Pass minutes as the requested duration; default 15."),
+        "input_schema": {"type": "object", "properties": {
+            "minutes": {"type": "number",
+                        "description": "How many minutes the link stays valid. Default 15."}
+        }},
+    },
 ]
 
 def run_local_tool(name, tool_input):
@@ -3512,6 +4016,8 @@ def run_local_tool(name, tool_input):
         )
     if name == "open_worldview":
         return open_worldview()
+    if name == "share_live_location":
+        return share_live_location(tool_input.get("minutes", 15))
     if name == "open_achilles":
         return open_achilles(tool_input.get("scene", "core"))
     if name == "open_roadmap":
@@ -6211,7 +6717,7 @@ def think(user_message, memory, lang=""):
                                 "spotify_previous", "spotify_volume", "spotify_now_playing",
                                 "learn_topic", "deep_learn_domain", "resume_learning",
                                 "learning_status", "open_search_panel", "open_worldview",
-                                "open_achilles", "open_roadmap"):
+                                "open_achilles", "open_roadmap", "share_live_location"):
                             out = run_local_tool(block.name, block.input or {})
                             tool_results.append({
                                 "type": "tool_result",
@@ -9003,6 +9509,20 @@ def main():
         _thr.Thread(target=_wv_autostart, daemon=True).start()
     except Exception as _e:
         print("[diag] worldview autostart not scheduled:", repr(_e))
+    # --- Secure live location sharing autostart (v4.68) ---------------
+    # Bring the isolated share server up for the whole session so an active
+    # share (and the phone uploader) survives even after the voice command,
+    # and best-effort expose ONLY that port through Tailscale Funnel.
+    try:
+        import threading as _thr2
+        def _loc_autostart():
+            try:
+                _ensure_location_sharing()
+            except Exception as _e:
+                print("[diag] location sharing autostart failed:", repr(_e))
+        _thr2.Thread(target=_loc_autostart, daemon=True).start()
+    except Exception as _e:
+        print("[diag] location sharing autostart not scheduled:", repr(_e))
     # ------------------------------------------------------------------
     root.mainloop()
 

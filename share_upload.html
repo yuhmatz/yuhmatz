@@ -1,0 +1,186 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#0b0f14">
+<title>Broadcast my location</title>
+<!--
+  OWNER-ONLY location uploader (v4.68). Served by jarvis.py at /u/<owner_key>.
+  Reads the owner key from its OWN URL path (never hard-coded), then streams
+  the phone's GPS to POST /api/location/update with an X-Owner-Key header.
+  Requires HTTPS for the Geolocation API - satisfied via Tailscale Funnel.
+-->
+<style>
+  :root { --bg:#0b0f14; --panel:#131a22; --fg:#e6edf3; --muted:#8b98a5;
+          --accent:#2ea043; --accent2:#d1242f; --line:#222c37; }
+  * { box-sizing:border-box; -webkit-tap-highlight-color:transparent; }
+  html,body { margin:0; height:100%; background:var(--bg); color:var(--fg);
+    font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif; }
+  body { display:flex; flex-direction:column; align-items:center;
+    padding:calc(env(safe-area-inset-top) + 22px) 18px
+            calc(env(safe-area-inset-bottom) + 22px); gap:18px; }
+  h1 { font-size:20px; margin:4px 0 0; font-weight:650; text-align:center; }
+  .sub { color:var(--muted); font-size:13px; text-align:center; max-width:340px;
+    line-height:1.5; margin:0; }
+  .btn { border:0; border-radius:16px; padding:20px; font-size:19px; font-weight:650;
+    color:#fff; width:100%; max-width:420px; cursor:pointer; letter-spacing:.2px; }
+  .btn.start { background:var(--accent); }
+  .btn.stop { background:var(--accent2); }
+  .btn:active { transform:scale(.99); }
+  .card { background:var(--panel); border:1px solid var(--line); border-radius:16px;
+    padding:16px 18px; width:100%; max-width:420px; }
+  .row { display:flex; justify-content:space-between; gap:12px; padding:7px 0;
+    font-size:14px; border-bottom:1px solid var(--line); }
+  .row:last-child { border-bottom:0; }
+  .row .k { color:var(--muted); }
+  .row .v { font-variant-numeric:tabular-nums; text-align:right; }
+  .status { display:flex; align-items:center; gap:9px; font-size:14px;
+    justify-content:center; }
+  .dot { width:11px; height:11px; border-radius:50%; background:#5a6570; flex:0 0 auto; }
+  .dot.live { background:var(--accent); box-shadow:0 0 0 0 rgba(46,160,67,.6);
+    animation:pulse 1.6s infinite; }
+  .dot.err { background:var(--accent2); }
+  @keyframes pulse { 0%{box-shadow:0 0 0 0 rgba(46,160,67,.55)}
+    70%{box-shadow:0 0 0 12px rgba(46,160,67,0)} 100%{box-shadow:0 0 0 0 rgba(46,160,67,0)} }
+  .hint { color:var(--muted); font-size:12px; text-align:center; max-width:420px;
+    line-height:1.5; }
+</style>
+</head>
+<body>
+  <h1>Broadcast my live location</h1>
+  <p class="sub">This page sends your phone's GPS to your assistant so an active
+    share link can show it. Keep it open and the screen awake while sharing.</p>
+
+  <button id="toggle" class="btn start">Start sharing</button>
+
+  <div class="status"><span id="dot" class="dot"></span><span id="statusText">Idle — not sharing.</span></div>
+
+  <div class="card">
+    <div class="row"><span class="k">Latitude</span><span class="v" id="lat">—</span></div>
+    <div class="row"><span class="k">Longitude</span><span class="v" id="lon">—</span></div>
+    <div class="row"><span class="k">Accuracy</span><span class="v" id="acc">—</span></div>
+    <div class="row"><span class="k">Last sent</span><span class="v" id="sent">—</span></div>
+    <div class="row"><span class="k">Updates</span><span class="v" id="count">0</span></div>
+  </div>
+
+  <p class="hint">Your location is only readable through a temporary share link
+    while it is valid. Close this page to stop broadcasting.</p>
+
+<script>
+(function () {
+  "use strict";
+
+  // The owner key travels only in this page's own URL: /u/<owner_key>.
+  var OWNER_KEY = decodeURIComponent(
+    (location.pathname.split("/").filter(Boolean).pop() || ""));
+
+  var btn = document.getElementById("toggle");
+  var dot = document.getElementById("dot");
+  var statusText = document.getElementById("statusText");
+  var elLat = document.getElementById("lat");
+  var elLon = document.getElementById("lon");
+  var elAcc = document.getElementById("acc");
+  var elSent = document.getElementById("sent");
+  var elCount = document.getElementById("count");
+
+  var watchId = null;
+  var last = null;            // last fix we received
+  var lastSentAt = 0;         // ms of last POST
+  var sentCount = 0;
+  var keepAlive = null;
+  var MIN_INTERVAL_MS = 3000; // don't hammer the server faster than ~3s
+
+  function setStatus(cls, text) {
+    dot.className = "dot" + (cls ? " " + cls : "");
+    statusText.textContent = text;
+  }
+
+  function fmtTime(ts) {
+    var d = new Date(ts);
+    return d.toLocaleTimeString();
+  }
+
+  function send(fix, reason) {
+    if (!fix) return;
+    var now = Date.now();
+    if (reason !== "keepalive" && (now - lastSentAt) < MIN_INTERVAL_MS) return;
+    lastSentAt = now;
+    fetch("/api/location/update", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "X-Owner-Key": OWNER_KEY },
+      body: JSON.stringify({
+        lat: fix.coords.latitude,
+        lon: fix.coords.longitude,
+        accuracy: fix.coords.accuracy,
+        timestamp: fix.timestamp
+      })
+    }).then(function (r) {
+      if (r.ok) {
+        sentCount++;
+        elCount.textContent = String(sentCount);
+        elSent.textContent = fmtTime(Date.now());
+        setStatus("live", "Live — broadcasting your location.");
+      } else if (r.status === 403) {
+        setStatus("err", "Rejected (bad owner key). Reopen the link from your assistant.");
+      } else {
+        setStatus("err", "Server error " + r.status + " — retrying.");
+      }
+    }).catch(function () {
+      setStatus("err", "Network error — retrying.");
+    });
+  }
+
+  function onFix(fix) {
+    last = fix;
+    elLat.textContent = fix.coords.latitude.toFixed(6);
+    elLon.textContent = fix.coords.longitude.toFixed(6);
+    elAcc.textContent = Math.round(fix.coords.accuracy) + " m";
+    send(fix, "watch");
+  }
+
+  function onErr(err) {
+    var msg = "Location error.";
+    if (err.code === 1) msg = "Permission denied. Allow location access and reload.";
+    else if (err.code === 2) msg = "Position unavailable.";
+    else if (err.code === 3) msg = "Timed out getting a fix.";
+    setStatus("err", msg);
+  }
+
+  function start() {
+    if (!("geolocation" in navigator)) {
+      setStatus("err", "This browser has no Geolocation API.");
+      return;
+    }
+    if (location.protocol !== "https:" && location.hostname !== "localhost") {
+      setStatus("err", "Geolocation needs HTTPS. Open the Funnel link, not the LAN address.");
+      return;
+    }
+    setStatus("", "Requesting location permission…");
+    watchId = navigator.geolocation.watchPosition(onFix, onErr, {
+      enableHighAccuracy: true, maximumAge: 2000, timeout: 15000
+    });
+    // Keepalive re-sends the last fix so the viewer keeps seeing a fresh
+    // "updated_at" even when the phone is stationary.
+    keepAlive = setInterval(function () { send(last, "keepalive"); }, 5000);
+    btn.textContent = "Stop sharing";
+    btn.className = "btn stop";
+  }
+
+  function stop() {
+    if (watchId !== null) { navigator.geolocation.clearWatch(watchId); watchId = null; }
+    if (keepAlive) { clearInterval(keepAlive); keepAlive = null; }
+    setStatus("", "Stopped — not sharing.");
+    btn.textContent = "Start sharing";
+    btn.className = "btn start";
+  }
+
+  btn.addEventListener("click", function () {
+    if (watchId === null) start(); else stop();
+  });
+
+  if (!OWNER_KEY) setStatus("err", "Missing owner key in the URL.");
+})();
+</script>
+</body>
+</html>

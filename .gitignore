@@ -6,6 +6,9 @@ spotify_token.json
 anthropic_usage.json
 telegram_chat.json
 telegram_pairing.txt
+location_state.json
+share_tokens.json
+location_owner_key.txt
 training_log.json
 tasks.json
 wake_diag.log

@@ -1,0 +1,259 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#0b0f14">
+<meta name="referrer" content="no-referrer">
+<title>Live location</title>
+<!--
+  PUBLIC live-location viewer (v4.68). Served by jarvis.py at /share/<token>.
+  Reads the token from its OWN URL path and polls
+  GET /api/share/<token>/location every ~5s. Shows nothing but the shared
+  live marker: no menus, no links back into the app. Intentionally minimal.
+-->
+<link href="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.css" rel="stylesheet"
+      integrity="sha384-MinO0mNliZ3vwppuPOUnGa+iq619pfMhLVUXfC4LHwSCvF9H+6P/KO4Q7qBOYV5V"
+      crossorigin="anonymous">
+<style>
+  :root { --bg:#0b0f14; --fg:#e6edf3; --muted:#c4ccd6; --accent:#2f81f7; }
+  * { box-sizing:border-box; -webkit-tap-highlight-color:transparent; }
+  html,body { margin:0; height:100%; background:var(--bg); color:var(--fg);
+    font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif; }
+  #map { position:absolute; inset:0; }
+
+  /* live marker: pulsing blue dot */
+  .me { width:20px; height:20px; }
+  .me .core { position:absolute; inset:0; margin:auto; width:16px; height:16px;
+    background:var(--accent); border:3px solid #fff; border-radius:50%;
+    box-shadow:0 0 0 1px rgba(0,0,0,.35); }
+  .me .halo { position:absolute; inset:0; margin:auto; width:16px; height:16px;
+    border-radius:50%; background:rgba(47,129,247,.45);
+    animation:ping 2s ease-out infinite; }
+  @keyframes ping { 0%{transform:scale(1);opacity:.7}
+    100%{transform:scale(4);opacity:0} }
+
+  /* bottom control bar */
+  .bar { position:absolute; left:0; right:0;
+    bottom:calc(env(safe-area-inset-bottom) + 14px);
+    display:flex; gap:10px; justify-content:center; padding:0 14px; z-index:5;
+    pointer-events:none; }
+  .bar > * { pointer-events:auto; }
+  .pill { background:rgba(19,26,34,.92); color:var(--fg);
+    border:1px solid rgba(255,255,255,.10); border-radius:14px;
+    padding:12px 16px; font-size:15px; font-weight:600; cursor:pointer;
+    backdrop-filter:blur(8px); display:inline-flex; align-items:center; gap:8px; }
+  .pill:active { transform:scale(.98); }
+  .pill.nav { background:var(--accent); border-color:transparent; color:#fff; }
+  .pill.small { padding:12px 14px; }
+
+  /* top status chip */
+  .chip { position:absolute; top:calc(env(safe-area-inset-top) + 12px);
+    left:50%; transform:translateX(-50%); z-index:5;
+    background:rgba(19,26,34,.92); border:1px solid rgba(255,255,255,.10);
+    border-radius:999px; padding:8px 14px; font-size:13px; color:var(--muted);
+    display:flex; align-items:center; gap:8px; backdrop-filter:blur(8px);
+    max-width:calc(100% - 28px); }
+  .chip .dot { width:9px; height:9px; border-radius:50%; background:#2ea043;
+    flex:0 0 auto; box-shadow:0 0 0 0 rgba(46,160,67,.6); animation:pulse 1.8s infinite; }
+  .chip .dot.stale { background:#d29922; animation:none; }
+  .chip .dot.dead { background:#d1242f; animation:none; }
+  @keyframes pulse { 0%{box-shadow:0 0 0 0 rgba(46,160,67,.5)}
+    70%{box-shadow:0 0 0 8px rgba(46,160,67,0)} 100%{box-shadow:0 0 0 0 rgba(46,160,67,0)} }
+
+  /* full-screen overlay (expired / waiting) */
+  .overlay { position:absolute; inset:0; z-index:20; display:none;
+    align-items:center; justify-content:center; text-align:center;
+    background:rgba(11,15,20,.94); padding:32px; }
+  .overlay.show { display:flex; }
+  .overlay .box { max-width:320px; }
+  .overlay .em { font-size:46px; margin-bottom:10px; }
+  .overlay h2 { margin:0 0 8px; font-size:20px; }
+  .overlay p { margin:0; color:var(--muted); line-height:1.5; font-size:14px; }
+  .hidden { display:none !important; }
+</style>
+</head>
+<body>
+  <div id="map"></div>
+
+  <div class="chip" id="chip"><span class="dot" id="statusDot"></span><span id="statusText">Connecting…</span></div>
+
+  <div class="bar">
+    <button class="pill small" id="layerBtn" title="Toggle satellite">🛰️ <span id="layerLabel">Satellite</span></button>
+    <button class="pill nav" id="navBtn">➤ Navigate</button>
+    <button class="pill small" id="wazeBtn" title="Open in Waze">Waze</button>
+    <button class="pill small hidden" id="recenterBtn" title="Recenter">◎</button>
+  </div>
+
+  <div class="overlay" id="overlay">
+    <div class="box">
+      <div class="em" id="ovEm">📡</div>
+      <h2 id="ovTitle">Waiting for location…</h2>
+      <p id="ovText">The map will update as soon as a live position arrives.</p>
+    </div>
+  </div>
+
+<script src="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.js"
+        integrity="sha384-SYKAG6cglRMN0RVvhNeBY0r3FYKNOJtznwA0v7B5Vp9tr31xAHsZC0DqkQ/pZDmj"
+        crossorigin="anonymous"></script>
+<script>
+(function () {
+  "use strict";
+
+  // Token from this page's own URL: /share/<token>.
+  var TOKEN = decodeURIComponent(
+    (location.pathname.split("/").filter(Boolean).pop() || ""));
+  var API = "/api/share/" + encodeURIComponent(TOKEN) + "/location";
+  var POLL_MS = 5000;
+
+  var OSM_LAYER = "osm", SAT_LAYER = "esri";
+  var style = {
+    version: 8,
+    sources: {
+      osm: { type: "raster", tileSize: 256,
+        tiles: ["https://a.tile.openstreetmap.org/{z}/{x}/{y}.png",
+                "https://b.tile.openstreetmap.org/{z}/{x}/{y}.png",
+                "https://c.tile.openstreetmap.org/{z}/{x}/{y}.png"],
+        attribution: "© OpenStreetMap contributors" },
+      esri: { type: "raster", tileSize: 256,
+        tiles: ["https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}"],
+        attribution: "Imagery © Esri, Maxar, Earthstar Geographics" }
+    },
+    layers: [
+      { id: OSM_LAYER, type: "raster", source: "osm", layout: { visibility: "visible" } },
+      { id: SAT_LAYER, type: "raster", source: "esri", layout: { visibility: "none" } }
+    ]
+  };
+
+  var map = new maplibregl.Map({
+    container: "map", style: style,
+    center: [0, 20], zoom: 1, attributionControl: true
+  });
+  map.addControl(new maplibregl.NavigationControl({ showCompass: false }), "top-right");
+
+  // marker
+  var el = document.createElement("div");
+  el.className = "me";
+  el.innerHTML = '<div class="halo"></div><div class="core"></div>';
+  var marker = new maplibregl.Marker({ element: el });
+
+  var current = null;      // {lat, lon}
+  var placed = false;
+  var follow = true;       // auto-recenter until the user pans
+  var satellite = false;
+  var expired = false;
+
+  // UI refs
+  var chipDot = document.getElementById("statusDot");
+  var chipText = document.getElementById("statusText");
+  var overlay = document.getElementById("overlay");
+  var ovEm = document.getElementById("ovEm");
+  var ovTitle = document.getElementById("ovTitle");
+  var ovText = document.getElementById("ovText");
+  var navBtn = document.getElementById("navBtn");
+  var wazeBtn = document.getElementById("wazeBtn");
+  var layerBtn = document.getElementById("layerBtn");
+  var layerLabel = document.getElementById("layerLabel");
+  var recenterBtn = document.getElementById("recenterBtn");
+
+  function showOverlay(em, title, text) {
+    ovEm.textContent = em; ovTitle.textContent = title; ovText.textContent = text;
+    overlay.classList.add("show");
+  }
+  function hideOverlay() { overlay.classList.remove("show"); }
+
+  function setStatus(cls, text) {
+    chipDot.className = "dot" + (cls ? " " + cls : "");
+    chipText.textContent = text;
+  }
+
+  function ago(sec) {
+    if (sec < 5) return "just now";
+    if (sec < 60) return Math.round(sec) + "s ago";
+    if (sec < 3600) return Math.round(sec / 60) + "m ago";
+    return Math.round(sec / 3600) + "h ago";
+  }
+
+  map.on("dragstart", function () { follow = false; recenterBtn.classList.remove("hidden"); });
+  map.on("zoomstart", function (e) { if (e.originalEvent) { follow = false; recenterBtn.classList.remove("hidden"); } });
+
+  recenterBtn.addEventListener("click", function () {
+    follow = true; recenterBtn.classList.add("hidden");
+    if (current) map.easeTo({ center: [current.lon, current.lat], zoom: Math.max(map.getZoom(), 15) });
+  });
+
+  layerBtn.addEventListener("click", function () {
+    satellite = !satellite;
+    map.setLayoutProperty(SAT_LAYER, "visibility", satellite ? "visible" : "none");
+    map.setLayoutProperty(OSM_LAYER, "visibility", satellite ? "none" : "visible");
+    layerLabel.textContent = satellite ? "Streets" : "Satellite";
+  });
+
+  navBtn.addEventListener("click", function () {
+    if (!current) return;
+    window.open("https://www.google.com/maps/dir/?api=1&destination="
+      + current.lat + "," + current.lon, "_blank", "noopener");
+  });
+  wazeBtn.addEventListener("click", function () {
+    if (!current) return;
+    window.open("https://waze.com/ul?ll=" + current.lat + "," + current.lon
+      + "&navigate=yes", "_blank", "noopener");
+  });
+
+  function update(lat, lon) {
+    current = { lat: lat, lon: lon };
+    marker.setLngLat([lon, lat]);
+    if (!placed) { marker.addTo(map); placed = true; }
+    if (follow) {
+      map.easeTo({ center: [lon, lat],
+        zoom: placed && map.getZoom() > 3 ? map.getZoom() : 15, duration: 800 });
+    }
+  }
+
+  function poll() {
+    if (expired) return;
+    fetch(API, { cache: "no-store" }).then(function (r) {
+      if (r.status === 410) {
+        expired = true;
+        setStatus("dead", "Link expired");
+        showOverlay("🔒", "This link has expired",
+          "The live location share is no longer active.");
+        return null;
+      }
+      if (!r.ok) throw new Error("status " + r.status);
+      return r.json();
+    }).then(function (d) {
+      if (!d) return;
+      if (d.lat === null || d.lon === null || d.lat === undefined || d.lon === undefined) {
+        setStatus("stale", "Waiting for a location fix…");
+        if (!placed) showOverlay("📡", "Waiting for location…",
+          "The map will update as soon as a live position arrives.");
+        return;
+      }
+      hideOverlay();
+      update(d.lat, d.lon);
+      var updatedAt = d.updated_at ? d.updated_at * 1000 : Date.now();
+      var age = (Date.now() - updatedAt) / 1000;
+      if (age < 30) setStatus("", "Live · updated " + ago(age));
+      else if (age < 300) setStatus("stale", "Last seen " + ago(age));
+      else setStatus("dead", "Last seen " + ago(age));
+    }).catch(function () {
+      setStatus("stale", "Reconnecting…");
+    });
+  }
+
+  if (!TOKEN) {
+    setStatus("dead", "Invalid link");
+    showOverlay("⚠️", "Invalid link", "This share link is missing its token.");
+  } else {
+    map.on("load", function () {
+      showOverlay("📡", "Waiting for location…",
+        "The map will update as soon as a live position arrives.");
+      poll();
+      setInterval(poll, POLL_MS);
+    });
+  }
+})();
+</script>
+</body>
+</html>
