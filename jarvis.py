@@ -1837,6 +1837,19 @@ _vessels_relay_lock = threading.Lock()
 # bbox corners are [lat, lon]; this covers the Eastern Med incl. Israel/Cyprus.
 _VESSELS_BBOX = [[[29.0, 24.0], [38.0, 37.0]]]
 
+# ---------------------------------------------------------------------------
+# WEBCAMS proxy for the WorldView CAMERAS layer (Windy webcams API v3).
+# The Windy key stays server-side, mirroring /flights (NOT /keys): the browser
+# sends coordinates, we attach the x-windy-api-key header and forward the
+# call. Deliberately NO caching on this route (unlike /quotes or /facts):
+# Windy signs its image URLs with tokens that expire after ~10 minutes on the
+# free tier, so a cached response would hand the page dead image links - and
+# Windy counts each webcam display as one API request anyway.
+# Module-level URL so tests can point the route at a mock Windy server.
+# ---------------------------------------------------------------------------
+_WINDY_WEBCAMS_URL = "https://api.windy.com/webcams/api/v3/webcams"
+_WEBCAMS_MAX_RADIUS_KM = 250  # ceiling: a zoomed-out map may not ask for the planet
+
 def _ais_bearing(b):
     """v4.67: return b if it is a valid 0-359 AIS bearing, else None. Handles the
     511 'heading not available' and 360 'COG not available' sentinels, None, and
@@ -2027,6 +2040,10 @@ class _FlightsProxyHandler(http.server.BaseHTTPRequestHandler):
                     self.wfile.write(body)
                 except Exception:
                     pass
+            return
+        # --- WorldView CAMERAS: Windy webcams proxy (see _handle_webcams) --
+        if parsed.path == "/webcams":
+            self._handle_webcams(parsed)
             return
         if parsed.path != "/flights":
             self.send_response(404)
@@ -2379,6 +2396,101 @@ class _FlightsProxyHandler(http.server.BaseHTTPRequestHandler):
                 self._cors_headers()
                 self.end_headers()
                 self.wfile.write(msg)
+            except Exception:
+                pass
+
+    def _handle_webcams(self, parsed):
+        # WorldView CAMERAS layer: GET /webcams?lat=<f>&lon=<f>&radius=<int km>
+        # Same shape of problem as /flights (a geographic query that needs a
+        # server-side credential), so it mirrors that route: validate before
+        # building any URL, forward with the secret, CORS on every path.
+        try:
+            params = urllib.parse.parse_qs(parsed.query)
+            lat = params.get("lat", ["32.0"])[0]
+            lon = params.get("lon", ["34.8"])[0]
+            radius = params.get("radius", ["100"])[0]
+            # validate as numbers BEFORE building any URL
+            lat = float(lat); lon = float(lon); radius = int(float(radius))
+        except (TypeError, ValueError, OverflowError) as e:
+            # junk coordinates get a 400 here, not a trip upstream to Windy
+            try:
+                body = ('{"error":' + json.dumps("bad lat/lon/radius: %s" % e)
+                        + ',"webcams":[]}').encode("utf-8")
+                self.send_response(400)
+                self.send_header("Content-Type", "application/json")
+                self._cors_headers()
+                self.end_headers()
+                self.wfile.write(body)
+            except Exception:
+                pass
+            return
+        radius = max(1, min(radius, _WEBCAMS_MAX_RADIUS_KM))
+        api_key = os.environ.get("WINDY_API_KEY", "") or ""
+        if not api_key:
+            # a structured, explainable empty result - NOT a 500. The page
+            # shows this message; the fix is one line in .env.
+            try:
+                body = json.dumps({"webcams": [],
+                                   "error": "no WINDY_API_KEY in .env"}
+                                  ).encode("utf-8")
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self._cors_headers()
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+            except Exception:
+                pass
+            return
+        try:
+            url = ("%s?nearby=%s,%s,%s&limit=50"
+                   "&include=images,location,urls&lang=en"
+                   % (_WINDY_WEBCAMS_URL, lat, lon, radius))
+            # v3 accepts the key ONLY as this header (renamed from v2's
+            # x-windy-key) - never as a query parameter.
+            req = urllib.request.Request(url, headers={
+                "User-Agent": "JARVIS-WorldView/1.0",
+                "Accept": "application/json",
+                "x-windy-api-key": api_key,
+            })
+            with urllib.request.urlopen(req, timeout=10) as r:
+                raw = json.loads(r.read().decode("utf-8", "replace"))
+            # reshape to only what the page needs, so the frontend is not
+            # coupled to Windy's full response shape
+            cams = []
+            for w in (raw.get("webcams") or []):
+                loc = w.get("location") or {}
+                imgs = (w.get("images") or {}).get("current") or {}
+                urls = w.get("urls") or {}
+                cam_lat = loc.get("latitude")
+                cam_lon = loc.get("longitude")
+                if cam_lat is None or cam_lon is None:
+                    continue
+                cams.append({
+                    "id": w.get("webcamId"),
+                    "title": w.get("title") or "Webcam",
+                    "lat": cam_lat, "lon": cam_lon,
+                    "preview": (imgs.get("preview")
+                                or imgs.get("thumbnail") or ""),
+                    "url": urls.get("detail") or "",
+                })
+            body = json.dumps({"webcams": cams,
+                               "count": len(cams)}).encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self._cors_headers()
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+        except Exception as e:
+            try:
+                body = ('{"error":' + json.dumps(str(e))
+                        + ',"webcams":[]}').encode("utf-8")
+                self.send_response(502)
+                self.send_header("Content-Type", "application/json")
+                self._cors_headers()
+                self.end_headers()
+                self.wfile.write(body)
             except Exception:
                 pass
 

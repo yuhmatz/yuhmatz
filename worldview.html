@@ -57,14 +57,17 @@
     <div><span class="dot" style="background:#ffd166"></span><b id="c_vessels">0</b> vessels</div>
     <div><span class="dot" style="background:#ff8c42"></span><b id="c_flights">0</b> aircraft</div>
     <div><span class="dot" style="background:#ff5d5d"></span><b id="c_quakes">0</b> quakes (24h)</div>
+    <div><span class="dot" style="background:#4fb6ff"></span><b id="c_cameras">0</b> webcams &#183; <a href="https://www.windy.com/" target="_blank" rel="noopener" style="color:#8b97a5">Windy</a></div>
   </div>
   <div id="status">starting…</div>
+  <div id="cam_err" style="display:none;color:#ff7b72;font-size:11px;margin-top:6px;max-width:250px;line-height:1.5"></div>
 </div>
 
 <div id="toggles">
   <div class="tg" data-layer="vessels">Ships<span class="sw">on</span></div>
   <div class="tg" data-layer="flights">Aircraft<span class="sw">on</span></div>
   <div class="tg" data-layer="quakes">Quakes<span class="sw">on</span></div>
+  <div class="tg" data-layer="cameras">Cameras<span class="sw">on</span></div>
   <div class="tg" data-layer="globe">Globe<span class="sw">on</span></div>
 </div>
 
@@ -110,6 +113,9 @@ document.getElementById("detail_x").addEventListener("click", hideDetail);
 loadLib(0);
 
 let map = null, globeOn = true;
+// CAMERAS layer state: toggle flag, how many webcams are currently drawn
+// (the transient-failure guard), and the moveend debounce timer.
+let camerasOn = true, camerasShown = 0, camMoveTimer = null;
 
 function applyGlobe(){ try { map.setProjection({ type: globeOn ? "globe" : "mercator" }); } catch(e){} }
 
@@ -128,6 +134,18 @@ function planeIcon(color){
   x.lineTo(-5,13); x.lineTo(-2,10); x.lineTo(-2,4); x.lineTo(-12,7); x.lineTo(-12,4);
   x.lineTo(-2,-3); x.closePath(); x.fill();
   x.lineWidth = 0.8; x.strokeStyle = "rgba(0,0,0,.5)"; x.stroke();
+  return x.getImageData(0, 0, s, s);
+}
+function cameraIcon(color){
+  // schematic webcam marker, same canvas pattern as arrowIcon()/planeIcon()
+  const s = 26, c = document.createElement("canvas"); c.width = c.height = s;
+  const x = c.getContext("2d");
+  x.fillStyle = color;
+  x.fillRect(9, 5, 8, 3);
+  x.fillRect(4, 8, 18, 12);
+  x.lineWidth = 1.2; x.strokeStyle = "rgba(0,0,0,.55)"; x.strokeRect(4, 8, 18, 12);
+  x.fillStyle = "rgba(0,0,0,.65)"; x.beginPath(); x.arc(13, 14, 4.2, 0, Math.PI * 2); x.fill();
+  x.fillStyle = "#ffffff"; x.beginPath(); x.arc(14.4, 12.6, 1.3, 0, Math.PI * 2); x.fill();
   return x.getImageData(0, 0, s, s);
 }
 
@@ -149,9 +167,11 @@ function initWorldView(){
   map.on("load", () => {
     map.addImage("ship-arrow", arrowIcon("#ffd166"), { pixelRatio: 2 });
     map.addImage("plane", planeIcon("#ff8c42"), { pixelRatio: 2 });
+    map.addImage("camera", cameraIcon("#4fb6ff"), { pixelRatio: 2 });
     map.addSource("vessels", { type: "geojson", data: EMPTY });
     map.addSource("flights", { type: "geojson", data: EMPTY });
     map.addSource("quakes",  { type: "geojson", data: EMPTY });
+    map.addSource("cameras", { type: "geojson", data: EMPTY });
 
     map.addLayer({ id: "vessels-dot", type: "circle", source: "vessels", paint: {
       "circle-radius": ["interpolate", ["linear"], ["zoom"], 4, 2.5, 10, 5],
@@ -167,18 +187,33 @@ function initWorldView(){
     map.addLayer({ id: "quakes-c", type: "circle", source: "quakes", paint: {
       "circle-radius": ["interpolate", ["linear"], ["get", "mag"], 1, 3, 6, 22],
       "circle-color": "rgba(255,93,93,.55)", "circle-stroke-color": "#ff5d5d", "circle-stroke-width": 1 } });
+    map.addLayer({ id: "cameras-sym", type: "symbol", source: "cameras", layout: {
+        "icon-image": "camera", "icon-size": 0.62,
+        "icon-allow-overlap": true, "icon-ignore-placement": true } });
 
     for (const id of ["vessels-dot", "vessels-arrow", "flights-sym", "quakes-c"]) {
       map.on("click", id, onFeatureClick);
       map.on("mouseenter", id, () => map.getCanvas().style.cursor = "pointer");
       map.on("mouseleave", id, () => map.getCanvas().style.cursor = "");
     }
+    map.on("click", "cameras-sym", onFeatureClick);
+    map.on("mouseenter", "cameras-sym", () => map.getCanvas().style.cursor = "pointer");
+    map.on("mouseleave", "cameras-sym", () => map.getCanvas().style.cursor = "");
+    // webcams are position-dependent, so reload after every pan/zoom -
+    // debounced, because moveend fires constantly and each call costs quota
+    map.on("moveend", () => {
+      if (!camerasOn) return;
+      clearTimeout(camMoveTimer);
+      camMoveTimer = setTimeout(pollCameras, 1200);
+    });
     wireToggles();
     applyGlobe();
     pollAll();
+    pollCameras();
     setInterval(pollVessels, 12000);
     setInterval(pollFlights, 12000);
     setInterval(pollQuakes, 5 * 60 * 1000);
+    setInterval(pollCameras, 30000);
   });
 }
 
@@ -237,9 +272,44 @@ async function pollQuakes(){
     document.getElementById("c_quakes").textContent = (j.features || []).length;
   } catch (e) { document.getElementById("c_quakes").textContent = "–"; }
 }
+async function pollCameras(){
+  if (!map || !camerasOn) return;
+  try {
+    const ctr = map.getCenter();
+    const r = await fetch(PROXY + "/webcams?lat=" + ctr.lat.toFixed(4) + "&lon=" + ctr.lng.toFixed(4) + "&radius=250", { cache: "no-store" });
+    const j = await r.json();
+    if (j && j.error && /WINDY_API_KEY/.test(j.error)) {
+      // a setup problem with an obvious fix, not a failure - say so directly
+      setData("cameras", []);
+      camerasShown = 0;
+      document.getElementById("c_cameras").textContent = "–";
+      showCamErr("CAMERAS: no WINDY_API_KEY in .env — get a free key at https://api.windy.com/keys");
+      return;
+    }
+    if (!r.ok) throw new Error("HTTP " + r.status + (j && j.error ? ": " + j.error : ""));
+    const feats = (j.webcams || []).filter(w => w.lat != null && w.lon != null).map(w => ({
+      type: "Feature",
+      properties: { kind: "camera", id: w.id, title: w.title || "Webcam",
+                    preview: w.preview || "", url: w.url || "" },
+      geometry: { type: "Point", coordinates: [w.lon, w.lat] } }));
+    setData("cameras", feats);
+    camerasShown = feats.length;
+    document.getElementById("c_cameras").textContent = feats.length;
+    clearCamErr();
+  } catch (e) {
+    // transient-failure guard (same fix FLIGHTS needed): if webcams are
+    // already on screen, keep them - never wipe a working map over one bad
+    // refresh. Only surface the error on a cold start.
+    if (camerasShown > 0) { console.warn("cameras refresh failed:", e); return; }
+    document.getElementById("c_cameras").textContent = "–";
+    showCamErr("No /webcams data — " + e.message);
+  }
+}
 function pollAll(){ pollVessels(); pollFlights(); pollQuakes(); }
 
 function row(k, v){ return v == null || v === "" ? "" : `<tr><td class="k">${k}</td><td>${v}</td></tr>`; }
+// escape remote text (webcam titles, URLs) before it goes into innerHTML
+function esc(s){ return String(s == null ? "" : s).replace(/[&<>"']/g, ch => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[ch])); }
 function onFeatureClick(e){
   const p = (e.features && e.features[0] && e.features[0].properties) || {};
   let html = "";
@@ -255,6 +325,17 @@ function onFeatureClick(e){
       + row("Altitude", p.alt != null ? p.alt + " ft" : null)
       + row("Ground spd", p.gs != null ? Math.round(p.gs) + " kn" : null)
       + row("Track", p.track != null ? Math.round(p.track) + "°" : null) + "</table>";
+  } else if (p.kind === "camera") {
+    // still image + REQUIRED Windy attribution. A 401 on the image is normal
+    // (free-tier links expire after ~10 min), so onerror swaps in an honest
+    // placeholder instead of a broken-image icon.
+    html = `<h3>${esc(p.title) || "Webcam"}</h3>`
+      + (p.preview ? `<img src="${esc(p.preview)}" alt="webcam preview" style="max-width:100%;border-radius:8px;display:block;margin:4px 0" onerror="this.style.display='none';var n=document.getElementById('cam_noimg');if(n)n.style.display='block'">` : "")
+      + `<div id="cam_noimg" style="display:${p.preview ? "none" : "block"};color:#8b97a5;font-size:12px;margin:4px 0">Preview unavailable — the image link may have expired.</div>`
+      + `<table>`
+      + (p.url ? row("Live view", `<a href="${esc(p.url)}" target="_blank" rel="noopener" style="color:#7cc4ff">open on windy.com</a>`) : "")
+      + row("Source", `<a href="https://www.windy.com/" target="_blank" rel="noopener" style="color:#7cc4ff">Provided by Windy</a>`)
+      + `</table>`;
   } else {
     html = `<h3>M ${(+p.mag).toFixed(1)} earthquake</h3><table>`
       + row("Place", p.place) + row("Time", p.time ? new Date(p.time).toLocaleString() : null)
@@ -267,6 +348,11 @@ function hideDetail(){ document.getElementById("detail").style.display = "none";
 function setStatus(t){ document.getElementById("status").textContent = t; }
 function showErr(t){ const e = document.getElementById("err"); e.textContent = t; e.style.display = "block"; }
 function clearErr(){ document.getElementById("err").style.display = "none"; }
+// CAMERAS gets its own error line (in the HUD): pollVessels() clears the
+// shared #err banner on every good poll, which would instantly wipe a
+// cameras message - e.g. the missing-WINDY_API_KEY hint - off the screen.
+function showCamErr(t){ const e = document.getElementById("cam_err"); e.textContent = t; e.style.display = "block"; }
+function clearCamErr(){ document.getElementById("cam_err").style.display = "none"; }
 
 function wireToggles(){
   document.querySelectorAll(".tg").forEach(btn => {
@@ -278,6 +364,7 @@ function wireToggles(){
       if (layer === "vessels") ["vessels-dot", "vessels-arrow"].forEach(l => map.getLayer(l) && map.setLayoutProperty(l, "visibility", vis));
       else if (layer === "flights") map.getLayer("flights-sym") && map.setLayoutProperty("flights-sym", "visibility", vis);
       else if (layer === "quakes") map.getLayer("quakes-c") && map.setLayoutProperty("quakes-c", "visibility", vis);
+      else if (layer === "cameras") { camerasOn = on; map.getLayer("cameras-sym") && map.setLayoutProperty("cameras-sym", "visibility", vis); if (on) pollCameras(); }
       else if (layer === "globe") { globeOn = on; applyGlobe(); }
     });
   });
