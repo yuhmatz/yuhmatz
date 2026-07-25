@@ -1,7 +1,7 @@
 """
 JARVIS v3.0 — voice assistant: bilingual, web search, tools, red-orange orb
 ============================================================================
-(Version is updated by hand on each change. Current: v4.67 — 30 Jun 2026.)
+(Version is updated by hand on each change. Current: v5.23 — 25 Jul 2026 — the static server no longer hands out .env, credentials or source.)
 
 What works now:
   * Wake word "Hey JARVIS" (continuous background listening); empty screen until
@@ -21,6 +21,14 @@ What works now:
     runs cleanly when launched from start_jarvis.bat (double-click).
 
 Changelog:
+  v4.74 - WAKE/DISPLAY fix: the floating orb never appeared when invoked.
+          The v4.70 Vosk wake engine returned early (leaving the wake path
+          dead) whenever Vosk was not installed or its model could not load,
+          and since the orb is hidden after boot it could then never pop on
+          the wake word - so activation produced an empty screen. _wake_loop
+          now falls back to the Whisper wake engine (the proven v4.67 path,
+          reusing the already-loaded self.wake_model) instead of returning,
+          so saying the wake word always pops the orb even without Vosk.
   v4.67 - Reliability + safety pass. WAKE: transcribe_wake no longer
           stacks VAD + double no-speech filtering, which on the tiny
           model trimmed a short isolated "Achilles"/"Jarvis" to an empty
@@ -603,6 +611,8 @@ Changelog:
 import os
 import sys
 import subprocess
+import secrets
+import hmac
 
 # Always work from the folder this file lives in, no matter how it was launched
 # (double-click, .bat, or cmd). Without this, double-clicking runs from the wrong
@@ -634,6 +644,7 @@ def _ensure_no_console():
 _ensure_no_console()
 
 import re
+import math  # v5.21: needed by the Web Mercator conversion in /property
 import time
 import json
 import base64
@@ -647,6 +658,7 @@ import urllib.request
 import urllib.error
 import urllib.parse
 import http.server
+import socketserver
 from pathlib import Path
 import tkinter as tk
 from tkinter import filedialog, scrolledtext
@@ -715,9 +727,17 @@ print("[diag] Anthropic  key:",
       ("loaded, %d chars" % len(ANTHROPIC_API_KEY)) if ANTHROPIC_API_KEY
       else "NOT FOUND in .env", flush=True)
 
-SSD_OBSIDIAN_VAULT = "./Obsidian_Vault/Daily_Logs/"
+# v5.20: anchored to THIS FILE, not the working directory. These were
+# relative paths, so they only ever resolved correctly because the startup
+# task happens to set its working directory here. Launched any other way,
+# ACHILLES would silently create a SECOND empty vault somewhere else and
+# appear to have forgotten everything. Resolves to the identical folder it
+# uses today, so nothing moves and no history is touched.
+_FILES_DIR = Path(__file__).resolve().parent
+_VAULT_ROOT = _FILES_DIR / "Obsidian_Vault"
+SSD_OBSIDIAN_VAULT = str(_VAULT_ROOT / "Daily_Logs") + os.sep
 # Knowledge module: persistent study notes that survive across sessions
-KNOWLEDGE_DIR = "./Obsidian_Vault/Knowledge/"
+KNOWLEDGE_DIR = str(_VAULT_ROOT / "Knowledge") + os.sep
 SAMPLE_RATE = 16000
 SHOW_SIGNAL = ".jarvis_show"   # desktop icon creates this to open the orb
 
@@ -928,9 +948,12 @@ Your current capabilities (what you can ALREADY do — do not suggest these as
 - Noise filtering; weather defaults to Alfei Menashe in Celsius.
 - A glowing red-orange orb with listening/thinking/speaking states.
 - WorldView: a 3D globe in the browser with live USGS earthquake data, opened via the open_worldview tool when the user asks to open WorldView / open the globe / show worldwide earthquakes (in English or Hebrew).
+- HERMES: a financial/investment terminal (markets, charts, portfolio, screener, orders, macro, risk, quant research), opened via the open_hermes tool when the user asks to open HERMES, the investment/trading terminal, the markets terminal, or the finance dashboard (Hebrew: 'פתח את הרמס', 'תפתח את הטרמינל', 'ממשק ההשקעה').
 - Achilles Core: an ultra-realistic WebGL black-hole screen that is your visual face, with a Solar System mode (clickable planets, facts + live news per planet), a typed command line, and a task list. Opened via the open_achilles tool when the user asks for the black hole, the Achilles screen, the solar system, or the to-do list (Hebrew: 'פתח את החור השחור', 'מערכת השמש', 'תראה לי את המשימות'). Pass scene='solar' for the solar system, scene='todo' for the task list, scene='core' for the black hole.
 - Task list: 'תוסיף משימה X' / 'add task X' adds a task; the list lives in tasks.json and is shown on the Achilles screen.
 - Mission Control: the project roadmap/status dashboard, opened via the open_roadmap tool when the user asks for the roadmap, project status, mission control, or the checklist page (in English or Hebrew).
+- Live location sharing: share_live_location creates a secure, temporary public link to your live location and sends it to your brother over Telegram. Use it whenever the user asks to share/send their live location, or 'where I am', for some minutes (English: 'share my location for 15 minutes', 'send my brother my live location'; Hebrew: 'שתף את המיקום שלי', 'תשלח לאח שלי את המיקום'). This is an EXISTING tool, not a missing capability - always call it for these requests instead of saying you cannot access location.
+- Requesting SOMEONE ELSE's location: request_location creates a join link the user forwards to a person; when that person opens it and approves, their live position appears on the user's map link. Consent-based. Optional input show_my_location=true also reveals the user's own location back to them (default: hidden). Use for 'where is he', 'request his location', Hebrew 'תבקש ממנו מיקום', 'תשלח לו קישור שיראה לי איפה הוא'. This too is an EXISTING tool - always call it rather than claiming you cannot locate people.
 - Deep Domain Learning (see CRITICAL rule #1): for a whole field (chemistry/physics/biology/etc.) call deep_learn_domain; for a narrow concept call learn_topic; for status call learning_status; to continue an existing curriculum call resume_learning. Always invoke the tool - never answer learning commands from memory.
 - Knowledge module: when the user explicitly asks you to LEARN, STUDY, RESEARCH, or BUILD KNOWLEDGE on a topic (English: 'learn X', 'study Y', 'research Z'; Hebrew: 'תלמד X', 'ללמוד על Y', 'תחקור Z', 'בנה לי ידע על W'), call the learn_topic tool with the topic. If they mention a project the topic relates to, pass it as context. The tool produces a deep study note saved to the user's Obsidian Knowledge folder; it persists across sessions. After the tool returns, tell the user what was created and offer to read them the TL;DR if they want.
 
@@ -1036,12 +1059,23 @@ def load_long_term_memory(max_chars=3000):
     logs = sorted(vault.glob("Log_*.md"), reverse=True)
     if not logs:
         return "No memory logs yet."
-    text = ""
+    # v5.20: this used to end with text[:max_chars] - the FIRST characters of
+    # the newest log. save_log APPENDS, so the front of that file is the
+    # start of the day: on a long day ACHILLES remembered the morning and
+    # never saw the most recent exchanges. Measured on a 40-exchange day it
+    # recalled exchanges 1-12 and dropped the last 28. Files are still read
+    # newest-first for speed, then put back into chronological order so the
+    # window can be taken from the RECENT end, which was always the intent.
+    parts = []
+    total = 0
     for lf in logs:
-        text += "\n" + lf.read_text(encoding="utf-8")
-        if len(text) >= max_chars:
+        chunk = lf.read_text(encoding="utf-8")
+        parts.append(chunk)
+        total += len(chunk) + 1
+        if total >= max_chars:
             break
-    return text[:max_chars].strip()
+    text = "\n".join(reversed(parts))
+    return text[-max_chars:].strip()
 
 def record_until_silence(filename="voice_input.wav", preroll=None):
     cd = 0.25
@@ -1189,6 +1223,21 @@ def strip_wake_prefix(text):
             continue
     return " ".join(words[cut:]).strip() if cut else text
 
+def _is_question(text):
+    """True if JARVIS's own reply is a question we should wait for an answer to.
+    Hebrew and English both use the ASCII '?'; also accept the Arabic mark.
+
+    v5.16j: check the last ~60 chars, not only the exact last character.
+    A reply like "...update it?" followed by a trailing reassurance sentence
+    ("...I'll wait.") used to be missed entirely because the literal last
+    character wasn't '?'. Looking at a short tail window catches a real
+    question even when the model adds a short sentence after it, while still
+    ignoring a stray '?' buried deep in a long unrelated reply."""
+    if not text:
+        return False
+    tail = text.rstrip()[-60:]
+    return ('?' in tail) or ('\u061f' in tail)
+
 def detect_write(text):
     if not text:
         return False
@@ -1221,6 +1270,27 @@ def detect_goodbye(text):
 def pick_farewell(is_he):
     import random
     return random.choice(FAREWELLS_HE if is_he else FAREWELLS_EN)
+
+FOLLOWUP_OFFERS_HE = [
+    "\u05e6\u05e8\u05d9\u05da \u05e2\u05d5\u05d3 \u05de\u05e9\u05d4\u05d5, \u05d0\u05d3\u05d5\u05e0\u05d9?",
+    "\u05de\u05e9\u05d4\u05d5 \u05e0\u05d5\u05e1\u05e3, \u05d0\u05d3\u05d5\u05e0\u05d9?",
+    "\u05d0\u05e4\u05e9\u05e8 \u05dc\u05e2\u05d6\u05d5\u05e8 \u05d1\u05e2\u05d5\u05d3 \u05de\u05e9\u05d4\u05d5?",
+    "\u05e2\u05d5\u05d3 \u05de\u05e9\u05d4\u05d5, \u05d0\u05d3\u05d5\u05e0\u05d9?",
+]
+FOLLOWUP_OFFERS_EN = [
+    "Anything else, sir?",
+    "Will there be anything else, sir?",
+    "Can I help with anything else?",
+    "Anything more, sir?",
+]
+
+def pick_followup_offer(is_he):
+    """v5.17: the closing offer appended to a spoken answer. Rotated so it
+    does not become a tic. Ends in a question mark on purpose - _is_question()
+    then holds the mic open, which is the whole point: ACHILLES asks, and is
+    already listening for the answer without another wake word."""
+    import random
+    return random.choice(FOLLOWUP_OFFERS_HE if is_he else FOLLOWUP_OFFERS_EN)
 
 def is_hebrew(text):
     return bool(re.search(r'[\u0590-\u05FF]', text))
@@ -1414,7 +1484,7 @@ def learn_topic(topic: str, context: str = ""):
         # Use a generous max_tokens so the note can be properly deep.
         # Model choice mirrors what the rest of JARVIS already uses.
         resp = client.messages.create(
-            model="claude-opus-4-7",
+            model="claude-opus-5",
             max_tokens=8000,
             system=research_system,
             messages=[{"role": "user", "content": user_prompt}],
@@ -1517,7 +1587,7 @@ def _decompose_domain(domain: str):
     )
     try:
         r = client.messages.create(
-            model="claude-opus-4-7",
+            model="claude-opus-5",
             max_tokens=2000,
             system=sys_p,
             messages=[{"role": "user", "content": "Field: " + domain}],
@@ -1654,7 +1724,7 @@ def _learn_one_into_domain(domain: str, topic: str, item: dict):
         "and note briefly what is out of scope."
     )
     r = client.messages.create(
-        model="claude-opus-4-7",
+        model="claude-opus-5",
         max_tokens=8000,
         system=research_system,
         messages=[{"role": "user",
@@ -1821,6 +1891,9 @@ _tle_cache = {"ts": 0.0, "data": b""}  # v4.51: Celestrak TLE cache (6h)
 _achilles_state = {"state": "loading", "scene": "core", "ts": 0.0,
                    "last_poll": 0.0}
 _planet_news_cache = {}  # v4.52: planet name -> {"ts": float, "text": str}
+_briefing_http_cache = {}  # v5.16: (part,lang) -> {"ts": float, "text": str}
+_briefing_audio_cache = {}  # v5.16b: (part,lang) -> {"ts": float, "path": str}
+_training_lock = threading.Lock()  # v5.16c: guards training_log.json
 _tasks_lock = threading.Lock()  # v4.53: guards tasks.json
 
 # ---------------------------------------------------------------------------
@@ -1834,8 +1907,226 @@ _vessels = {}                        # mmsi -> {mmsi,lat,lon,cog,sog,heading,nam
 _vessels_lock = threading.Lock()
 _vessels_relay_started = False
 _vessels_relay_lock = threading.Lock()
+# v4.96: self-diagnostics surfaced in the /vessels payload so an empty map can
+# be diagnosed from the browser (no console under pythonw.exe).
+_vessels_status = {"relay": "not started", "detail": ""}
 # bbox corners are [lat, lon]; this covers the Eastern Med incl. Israel/Cyprus.
 _VESSELS_BBOX = [[[29.0, 24.0], [38.0, 37.0]]]
+
+# ---------------------------------------------------------------------------
+# WEBCAMS proxy for the WorldView CAMERAS layer (Windy webcams API v3).
+# The Windy key stays server-side, mirroring /flights (NOT /keys): the browser
+# sends coordinates, we attach the x-windy-api-key header and forward the
+# call. Deliberately NO caching on this route (unlike /quotes or /facts):
+# Windy signs its image URLs with tokens that expire after ~10 minutes on the
+# free tier, so a cached response would hand the page dead image links - and
+# Windy counts each webcam display as one API request anyway.
+# Module-level URL so tests can point the route at a mock Windy server.
+# ---------------------------------------------------------------------------
+_WINDY_WEBCAMS_URL = "https://api.windy.com/webcams/api/v3/webcams"
+_WEBCAMS_MAX_RADIUS_KM = 250  # ceiling: a zoomed-out map may not ask for the planet
+
+# --- v5.21 GovMap property lookup ------------------------------------------
+# Public Israeli government mapping API. No key, no account. Measured live
+# before this was written: the chain is address-or-point -> polygons -> deals.
+_GOVMAP_BASE = "https://www.govmap.gov.il/api"
+_GOVMAP_MAX_RADIUS_M = 500   # metres; a wider sweep returns a different street
+_GOVMAP_TIMEOUT = 20
+# GovMap speaks Web Mercator metres, the globe speaks lat/lon. Verified
+# against a real response: POINT(3871175.13 3773217.70) is Dizengoff 50,
+# which round-trips to 32.075442, 34.775358.
+_MERC_PER_DEG = 111319.490793
+
+def _merc_from_lonlat(lon, lat):
+    """lon/lat degrees -> Web Mercator metres."""
+    x = float(lon) * _MERC_PER_DEG
+    lat = max(-85.05112878, min(85.05112878, float(lat)))
+    rad = math.radians(lat)
+    y = math.log(math.tan(math.pi / 4.0 + rad / 2.0)) * 6378137.0
+    return x, y
+
+def _lonlat_from_merc(x, y):
+    """Web Mercator metres -> lon/lat degrees."""
+    lon = float(x) / _MERC_PER_DEG
+    lat = math.degrees(2.0 * math.atan(math.exp(float(y) / 6378137.0)) - math.pi / 2.0)
+    return lon, lat
+
+def _govmap_get(path):
+    """GET a GovMap endpoint and parse JSON. Returns None on any failure -
+    a property lookup that fails must degrade to an empty card, never take
+    the request handler down."""
+    try:
+        req = urllib.request.Request(
+            _GOVMAP_BASE + path,
+            headers={"Accept": "application/json",
+                     "User-Agent": "Mozilla/5.0 ACHILLES"})
+        with urllib.request.urlopen(req, timeout=_GOVMAP_TIMEOUT) as r:
+            return json.loads(r.read().decode("utf-8", "replace"))
+    except Exception as e:
+        print("[property] GET %s failed: %r" % (path, e), flush=True)
+        return None
+
+def _govmap_post(path, payload):
+    """POST JSON to a GovMap endpoint. Same failure contract as _govmap_get."""
+    try:
+        data = json.dumps(payload).encode("utf-8")
+        req = urllib.request.Request(
+            _GOVMAP_BASE + path, data=data,
+            headers={"Content-Type": "application/json; charset=utf-8",
+                     "Accept": "application/json",
+                     "User-Agent": "Mozilla/5.0 ACHILLES"})
+        with urllib.request.urlopen(req, timeout=_GOVMAP_TIMEOUT) as r:
+            return json.loads(r.read().decode("utf-8", "replace"))
+    except Exception as e:
+        print("[property] POST %s failed: %r" % (path, e), flush=True)
+        return None
+
+def _govmap_point_for_address(address):
+    """Address text -> Web Mercator point. The coordinates arrive as a WKT
+    string in a field called shape, not as a numeric pair."""
+    data = _govmap_post("/search-service/autocomplete",
+                        {"searchText": address, "language": "he",
+                         "isAccurate": False, "maxResults": 3})
+    if not data:
+        return None
+    results = data.get("results") or []
+    if not results:
+        return None
+    m = re.search(r"POINT\s*\(\s*([-\d.]+)[\s,]+([-\d.]+)\s*\)",
+                  str(results[0].get("shape") or ""))
+    if not m:
+        return None
+    return (float(m.group(1)), float(m.group(2)),
+            str(results[0].get("text") or ""))
+
+def _govmap_deal_fields(d):
+    """Reshape one GovMap transaction into the fields the card shows.
+    The heavy shape polygon is deliberately dropped here - it is tens of
+    kilobytes per deal and the card never draws it."""
+    def num(v):
+        try:
+            return float(v)
+        except (TypeError, ValueError):
+            return None
+    area = num(d.get("assetArea"))
+    amount = num(d.get("dealAmount"))
+    per_m2 = None
+    if area and amount and area > 0:
+        per_m2 = round(amount / area)
+    return {
+        "date": str(d.get("dealDate") or "")[:10],
+        "amount": amount,
+        "area_m2": area,
+        "rooms": num(d.get("assetRoomNum")),
+        "price_per_m2": per_m2,
+        "floor": str(d.get("floorNo") or ""),
+        "type": str(d.get("propertyTypeDescription") or ""),
+        "nature": str(d.get("dealNatureDescription") or ""),
+        "street": str(d.get("streetNameHeb") or ""),
+        "house": str(d.get("houseNum") or ""),
+        "city": str(d.get("settlementNameHeb") or ""),
+        "neighborhood": str(d.get("neighborhood") or ""),
+        "gush": str(d.get("gushNum") or ""),
+        "parcel": str(d.get("parcelNum") or ""),
+        "sub_parcel": str(d.get("subParcelNum") or ""),
+    }
+
+def _govmap_property_at(lat, lon, radius_m=150, address=None):
+    """The whole chain, in one call.
+
+    Returns a dict for the info card. Every stage degrades to a partial
+    answer rather than an error: a point with no parcel still reports its
+    coordinates, a parcel with no transactions still reports the parcel."""
+    out = {"ok": True, "lat": lat, "lon": lon, "address": "",
+           "address_near": None,
+           "parcels": [], "deals": [], "summary": {}, "note": ""}
+    if address:
+        hit = _govmap_point_for_address(address)
+        if hit:
+            x, y, label = hit
+            out["address"] = label
+            lon, lat = _lonlat_from_merc(x, y)
+            out["lat"], out["lon"] = round(lat, 6), round(lon, 6)
+        else:
+            x, y = _merc_from_lonlat(lon, lat)
+    else:
+        x, y = _merc_from_lonlat(lon, lat)
+
+    # v5.22: the address and the deal history are two different questions
+    # and were being answered by one query. Ranking parcels by deal count
+    # meant a click could report a busy street a block away instead of the
+    # building under the cursor - which is what produced a wrong address, a
+    # contradiction against the OSM row, and sometimes nothing at all.
+    #
+    # A tight sweep answers WHERE AM I. The wide sweep still answers WHAT
+    # SOLD NEARBY. Neither is forced to serve the other.
+    near = _govmap_get("/real-estate/deals/%s,%s/%d" % (x, y, 40))
+    if isinstance(near, list):
+        for p in near:
+            if not isinstance(p, dict):
+                continue
+            st = str(p.get("streetNameHeb") or "").strip()
+            hn = str(p.get("houseNum") or "").strip()
+            if st and hn:
+                out["address_near"] = {
+                    "street": st, "house": hn,
+                    "city": str(p.get("settlementNameHeb") or "").strip(),
+                    "text": (st + " " + hn).strip(),
+                }
+                break
+
+    polys = _govmap_get("/real-estate/deals/%s,%s/%d" % (x, y, radius_m))
+    if not isinstance(polys, list):
+        out["note"] = "no parcel data returned for this point"
+        return out
+
+    named = []
+    for p in polys:
+        if not isinstance(p, dict) or not p.get("polygon_id"):
+            continue
+        try:
+            count = int(p.get("dealscount") or 0)
+        except (TypeError, ValueError):
+            count = 0
+        named.append({"polygon_id": str(p.get("polygon_id")),
+                      "deals_count": count,
+                      "street": str(p.get("streetNameHeb") or ""),
+                      "house": str(p.get("houseNum") or ""),
+                      "city": str(p.get("settlementNameHeb") or "")})
+    # A street-level polygon carries a house number; the numberless ones are
+    # whole-neighbourhood aggregates and would answer about the wrong building.
+    named.sort(key=lambda q: (0 if q["house"] else 1, -q["deals_count"]))
+    out["parcels"] = named[:12]
+    if not named:
+        out["note"] = "point resolved but no parcels within %d m" % radius_m
+        return out
+
+    for cand in named[:4]:
+        deals = _govmap_get("/real-estate/street-deals/%s?limit=25"
+                            % urllib.parse.quote(cand["polygon_id"]))
+        if isinstance(deals, dict):
+            deals = deals.get("results") or deals.get("data") or []
+        if not isinstance(deals, list) or not deals:
+            continue
+        rows = [_govmap_deal_fields(d) for d in deals if isinstance(d, dict)]
+        rows = [r for r in rows if r["amount"]]
+        if not rows:
+            continue
+        rows.sort(key=lambda r: r["date"], reverse=True)
+        out["deals"] = rows
+        out["matched_parcel"] = cand
+        areas = [r["price_per_m2"] for r in rows if r["price_per_m2"]]
+        out["summary"] = {
+            "count": len(rows),
+            "latest": rows[0]["date"],
+            "median_price_per_m2": (sorted(areas)[len(areas) // 2]
+                                    if areas else None),
+        }
+        break
+    if not out["deals"]:
+        out["note"] = ("parcels found but no recorded transactions - "
+                       "not every property is registered")
+    return out
 
 def _ais_bearing(b):
     """v4.67: return b if it is a valid 0-359 AIS bearing, else None. Handles the
@@ -1858,6 +2149,7 @@ async def _vessels_ws_loop(api_key):
         try:
             async with websockets.connect(url, ping_interval=20, max_size=None) as ws:
                 await ws.send(sub)
+                _vessels_status["detail"] = "connected " + time.strftime("%H:%M:%S")
                 async for raw in ws:
                     try:
                         msg = json.loads(raw)
@@ -1911,6 +2203,7 @@ async def _vessels_ws_loop(api_key):
                             v["ts"] = now
                             _vessels[mmsi] = v
         except Exception as e:
+            _vessels_status["detail"] = "reconnecting after: %r" % (e,)
             try:
                 print("[diag] vessels relay reconnect after error: %r" % (e,))
             except Exception:
@@ -1926,11 +2219,15 @@ def _start_vessels_relay():
             return
         api_key = os.environ.get("AISSTREAM_API_KEY", "") or ""
         if not api_key:
+            _vessels_status.update({"relay": "disabled",
+                                    "detail": "no AISSTREAM_API_KEY in .env"})
             print("[diag] vessels relay: no AISSTREAM_API_KEY in .env - VESSELS disabled")
             return
         try:
             import websockets  # noqa: F401
         except Exception:
+            _vessels_status.update({"relay": "disabled",
+                                    "detail": "websockets package not installed"})
             print("[diag] vessels relay: `websockets` not installed - run: pip install websockets")
             return
         def _run():
@@ -1940,13 +2237,826 @@ def _start_vessels_relay():
                 print("[diag] vessels relay thread died: %r" % (e,))
         threading.Thread(target=_run, daemon=True, name="jarvis-vessels-relay").start()
         _vessels_relay_started = True
+        _vessels_status.update({"relay": "running", "detail": "connecting..."})
         print("[diag] vessels relay started (aisstream, Eastern-Med bbox)")
+
+
+
+# ---------------------------------------------------------------------------
+# WARWATCH relay (v4.96). GDELT's GEO 2.0 API was retired server-side (returns
+# 404 as of Jul 2026), so WorldView can no longer query it from the browser.
+# Instead we consume GDELT's raw 2.0 event stream: a CSV.zip published every
+# 15 minutes with real coordinates and CAMEO codes. A browser can't read it
+# (zip, no CORS), so this relay downloads each update, keeps only conflict
+# events (CAMEO root 18 assault / 19 fight / 20 mass violence), accumulates
+# them in memory with a 24h TTL, and serves GeoJSON at GET /warwatch on the
+# :7778 proxy - the exact same GeoJSON shape the old GEO API returned, so the
+# WorldView layer code is unchanged apart from the URL. Backfills the last
+# ~2 hours on startup, then follows lastupdate.txt every 5 minutes.
+# ---------------------------------------------------------------------------
+_warwatch = {}                       # event_id -> {lat,lon,name,url,tone,articles,date,ts}
+_warwatch_lock = threading.Lock()
+_warwatch_relay_started = False
+_warwatch_relay_lock = threading.Lock()
+_warwatch_status = {"state": "not started", "last_fetch": 0, "last_error": ""}
+_WARWATCH_CODES = ("18", "19", "20")   # CAMEO root: assault / fight / mass violence
+_WW_UNREST_CODES = ("14",)             # CAMEO root: protest - feeds country tension only
+_WARWATCH_TTL = 24 * 3600
+# v4.97: country tension tiers (24h windows). Tier 2 = war-level (red),
+# tier 1 = small/medium political-civil unrest (orange).
+# v4.98 tier logic. GDELT root 18 (assault) also catches ordinary violent-crime
+# news, which falsely tinted low-tension countries. War tier now keys on
+# roots 19 (fight) + 20 (mass violence) only; 18 and 14 can at most reach orange.
+_WW_RED_WAR = 12         # fight/mass-violence events in 24h -> red
+_WW_ORANGE_WAR = 3       # fight/mass-violence events in 24h -> orange
+_WW_ORANGE_ASSAULT = 25  # assault-coverage events (incl. crime news) -> orange
+_WW_ORANGE_UNREST = 15   # protest events in 24h -> orange
+_ww_briefs = {}              # iso3 -> {"text":..., "ts":...}
+_ww_brief_lock = threading.Lock()
+_WW_BRIEF_TTL = 24 * 3600
+# --- v4.99: market data (yfinance) ---------------------------------------
+_ww_facts = {}               # iso3 -> {"data":..., "ts":...}
+_ww_market = {}              # iso3 -> {"data":..., "ts":...}
+_ww_market_lock = threading.Lock()
+_WW_MARKET_TTL = 6 * 3600
+_ww_company = {}             # sym -> {"data":..., "ts":...}
+_ww_company_lock = threading.Lock()
+_WW_COMPANY_TTL = 6 * 3600
+# --- v5.7: HERMES MKT tab quotes -----------------------------------------
+_quotes_cache = {"data": None, "ts": 0.0}
+_quotes_lock = threading.Lock()
+_QUOTES_TTL = 45
+# HERMES symbol -> yfinance ticker. Only instruments with a reliable, free,
+# well-known yfinance mapping are listed; anything absent here (bond yields,
+# EURILS/GBPILS - handled below as derived crosses) stays simulated client-side.
+_HERMES_TICKERS = {
+    # IL equities (TASE-only tickers need .TA; dual-listed ones trade directly)
+    "TEVA": "TEVA", "LUMI": "LUMI.TA", "POLI": "POLI.TA", "NICE": "NICE",
+    "ESLT": "ESLT", "MZTF": "MZTF.TA", "DSCT": "DSCT.TA", "BEZQ": "BEZQ.TA",
+    "ICL": "ICL", "STRS": "STRS.TA",
+    # US equities
+    "AAPL": "AAPL", "MSFT": "MSFT", "NVDA": "NVDA", "TSLA": "TSLA",
+    "AMZN": "AMZN", "GOOGL": "GOOGL", "META": "META", "JPM": "JPM",
+    "LLY": "LLY", "XOM": "XOM",
+    # Indices
+    "TA125": "^TA125.TA", "SPX": "^GSPC", "NDX": "^NDX", "DJI": "^DJI",
+    "DAX": "^GDAXI", "FTSE": "^FTSE", "N225": "^N225",
+    # FX (direct)
+    "USDILS": "ILS=X", "EURUSD": "EURUSD=X", "USDJPY": "JPY=X", "GBPUSD": "GBPUSD=X",
+    # Crypto
+    "BTC": "BTC-USD", "ETH": "ETH-USD", "SOL": "SOL-USD", "BNB": "BNB-USD",
+    # Commodities (futures)
+    "XAU": "GC=F", "XAG": "SI=F", "WTI": "CL=F", "BRENT": "BZ=F",
+    "HG": "HG=F", "NG": "NG=F",
+}
+_HERMES_DERIVED_CROSSES = {  # computed from already-fetched direct quotes
+    "EURILS": ("EURUSD", "USDILS"),  # EUR/ILS = EURUSD * USDILS
+    "GBPILS": ("GBPUSD", "USDILS"),  # GBP/ILS = GBPUSD * USDILS
+}
+
+def _quotes_one(item):
+    sym, tkr = item
+    try:
+        import yfinance as yf
+        t = yf.Ticker(tkr)
+        h = t.history(period="5d", interval="1d")
+        if len(h) < 2:
+            return sym, None
+        last, prev = h.iloc[-1], h.iloc[-2]
+        px, prev_close = float(last["Close"]), float(prev["Close"])
+        hi, lo = float(last["High"]), float(last["Low"])
+        vol = float(last["Volume"]) if last["Volume"] == last["Volume"] else 0.0
+        # TASE tickers (.TA suffix) quote in agorot (ILS x100) via yfinance -
+        # same currency quirk already fixed for country market-cap data.
+        # chgPct is scale-invariant (both px and prev_close /100), so only
+        # px/chg/hi/lo need normalizing; vol (share count) is untouched.
+        try:
+            cur = t.fast_info["currency"]
+        except Exception:
+            cur = None
+        if cur in ("ILA", "ILa"):
+            px, prev_close, hi, lo = px / 100.0, prev_close / 100.0, hi / 100.0, lo / 100.0
+        chg = px - prev_close
+        chg_pct = (chg / prev_close * 100.0) if prev_close else 0.0
+        return sym, {"px": px, "chg": chg, "chgPct": chg_pct, "hi": hi, "lo": lo, "vol": vol}
+    except Exception:
+        return sym, None
+
+def _quotes_build():
+    import concurrent.futures as _cf
+    out = {}
+    with _cf.ThreadPoolExecutor(max_workers=10) as ex:
+        for sym, q in ex.map(_quotes_one, _HERMES_TICKERS.items()):
+            if q is not None:
+                out[sym] = q
+    for cross_sym, (a, b) in _HERMES_DERIVED_CROSSES.items():
+        if a in out and b in out:
+            px = out[a]["px"] * out[b]["px"]
+            # approximate the cross's daily change from the two legs' pct moves
+            chg_pct = out[a]["chgPct"] + out[b]["chgPct"]
+            out[cross_sym] = {"px": px, "chg": px * chg_pct / 100.0, "chgPct": chg_pct,
+                              "hi": px * 1.003, "lo": px * 0.997, "vol": 0.0}
+    return out
+# --- v5.1: FX normalization + World Bank facts ---------------------------
+_fx_cache = {}
+
+def _fx_per_usd(cur):
+    """How many units of `cur` per 1 USD (cached 6h). Falls back to 1.0."""
+    cur = (cur or "USD").upper()
+    if cur in ("USD", ""):
+        return 1.0
+    c = _fx_cache.get(cur)
+    if c and time.time() - c["ts"] < 6 * 3600:
+        return c["v"]
+    v = None
+    try:
+        import yfinance as yf
+        h = yf.Ticker(cur + "=X").history(period="5d")
+        if len(h):
+            v = float(h["Close"].iloc[-1])
+    except Exception:
+        pass
+    if not v:
+        v = 1.0
+    _fx_cache[cur] = {"v": v, "ts": time.time()}
+    return v
+
+def _cap_to_usd(mc, cur):
+    """Convert a market cap to USD. Handles agorot (ILA) and pence (GBp)."""
+    if not mc:
+        return None
+    try:
+        mc = float(mc)
+        cur = cur or "USD"
+        if cur in ("ILA", "ILa"):          # Tel Aviv quotes in agorot
+            mc, cur = mc / 100.0, "ILS"
+        elif cur in ("GBp", "GBX"):        # London quotes in pence
+            mc, cur = mc / 100.0, "GBP"
+        return round(mc / _fx_per_usd(cur), 2)
+    except Exception:
+        return None
+
+def _wb_get(url):
+    import json as _json
+    req = urllib.request.Request(url,
+                                 headers={"User-Agent": "ACHILLES-WorldView/1.0"})
+    with urllib.request.urlopen(req, timeout=25) as r:
+        return _json.loads(r.read().decode("utf-8", "replace"))
+
+_WB_INDICATORS = (("population", "SP.POP.TOTL"), ("gdp", "NY.GDP.MKTP.CD"),
+                  ("gdp_pc", "NY.GDP.PCAP.CD"), ("gdp_growth", "NY.GDP.MKTP.KD.ZG"),
+                  ("inflation", "FP.CPI.TOTL.ZG"))
+# Local capitals (ISO3). Used when the World Bank leaves capitalCity blank.
+_CAPITALS = {
+ "ISR":"Jerusalem","USA":"Washington, D.C.","GBR":"London","DEU":"Berlin",
+ "FRA":"Paris","JPN":"Tokyo","CHN":"Beijing","IND":"New Delhi","BRA":"Brasilia",
+ "CAN":"Ottawa","AUS":"Canberra","KOR":"Seoul","TWN":"Taipei","SAU":"Riyadh",
+ "TUR":"Ankara","ITA":"Rome","ESP":"Madrid","NLD":"Amsterdam","CHE":"Bern",
+ "SWE":"Stockholm","EGY":"Cairo","GRC":"Athens","POL":"Warsaw","MEX":"Mexico City",
+ "ARG":"Buenos Aires","IDN":"Jakarta","PAK":"Islamabad","RUS":"Moscow",
+ "UKR":"Kyiv","SYR":"Damascus","LBN":"Beirut","IRQ":"Baghdad","IRN":"Tehran",
+ "JOR":"Amman","YEM":"Sanaa","PSE":"Jerusalem","AFG":"Kabul","SDN":"Khartoum",
+ "LBY":"Tripoli","NGA":"Abuja","ETH":"Addis Ababa","ZAF":"Pretoria",
+ "KEN":"Nairobi","COD":"Kinshasa","MAR":"Rabat","DZA":"Algiers","TUN":"Tunis",
+ "NOR":"Oslo","DNK":"Copenhagen","FIN":"Helsinki","IRL":"Dublin","PRT":"Lisbon",
+ "AUT":"Vienna","BEL":"Brussels","CZE":"Prague","HUN":"Budapest","ROU":"Bucharest",
+ "THA":"Bangkok","VNM":"Hanoi","PHL":"Manila","MYS":"Kuala Lumpur","SGP":"Singapore",
+ "ARE":"Abu Dhabi","QAT":"Doha","KWT":"Kuwait City","BHR":"Manama","OMN":"Muscat",
+ "NZL":"Wellington","CHL":"Santiago","COL":"Bogota","PER":"Lima","VEN":"Caracas",
+}
+
+def _wb_facts(iso):
+    """Country sheet from the World Bank API: identity + key economics."""
+    out = {"iso": iso}
+    try:
+        j = _wb_get("https://api.worldbank.org/v2/country/%s?format=json" % iso)
+        c0 = j[1][0]
+        out["name"] = c0.get("name")
+        out["capital"] = c0.get("capitalCity")
+        out["region"] = (c0.get("region") or {}).get("value")
+        out["income"] = (c0.get("incomeLevel") or {}).get("value")
+    except Exception as e:
+        out["error_meta"] = repr(e)[:80]
+    _dbg = {}
+    for key, ind in _WB_INDICATORS:
+        val = None
+        for _att in range(3):
+            try:
+                # Simple date-range query only (World Bank rejects mrnev+per_page
+                # on some indicators with HTTP 400). Results come newest-first.
+                j = _wb_get("https://api.worldbank.org/v2/country/%s/indicator/%s"
+                            "?format=json&date=2010:2025" % (iso, ind))
+                rows = j[1] if (isinstance(j, list) and len(j) > 1) else None
+                for _r in (rows or []):
+                    if _r.get("value") is not None:
+                        val = {"v": _r.get("value"), "year": _r.get("date")}
+                        break
+                if val:
+                    break
+            except Exception as _e:
+                _dbg[key] = repr(_e)[:60]
+            time.sleep(0.3)
+        out[key] = val
+        time.sleep(0.12)
+    if _dbg:
+        out["_wb_debug"] = _dbg
+    # v5.2: derive total GDP when the World Bank leaves it blank but
+    # per-capita and population are present.
+    try:
+        if (not out.get("gdp") or out["gdp"].get("v") is None):
+            pc = out.get("gdp_pc") or {}
+            pop = out.get("population") or {}
+            if pc.get("v") and pop.get("v"):
+                out["gdp"] = {"v": round(float(pc["v"]) * float(pop["v"])),
+                              "year": pc.get("year"), "derived": True}
+    except Exception:
+        pass
+    # v5.3: fill a missing capital from the local table (no network dependency).
+    if not out.get("capital"):
+        out["capital"] = _CAPITALS.get(iso, "")
+    return out
+_WW_FACTS_TTL = 7 * 24 * 3600
+# Curated: iso3 -> (index_ticker, index_name, [(ticker, name, sector), ...])
+# Countries not listed get partial data (brief + facts only) by design.
+_WW_MARKETS = {
+ "ISR": ("^TA125.TA", "TA-125", [
+    ("NICE", "NICE", "Technology"), ("CHKP", "Check Point", "Cybersecurity"),
+    ("TEVA", "Teva", "Healthcare"), ("MBLY", "Mobileye", "Auto-Tech"),
+    ("ESLT", "Elbit Systems", "Defense"), ("CYBR", "CyberArk", "Cybersecurity"),
+    ("MNDY", "monday.com", "Software"), ("WIX", "Wix", "Software"),
+    ("GLBE", "Global-e", "E-Commerce"), ("TSEM", "Tower Semiconductor", "Semiconductors"),
+    ("NVMI", "Nova", "Semiconductors"), ("CAMT", "Camtek", "Semiconductors"),
+    ("ICL", "ICL Group", "Chemicals"), ("ORA", "Ormat", "Energy"),
+    ("LUMI.TA", "Bank Leumi", "Banking"), ("POLI.TA", "Bank Hapoalim", "Banking"),
+    ("MZTF.TA", "Mizrahi Tefahot", "Banking"), ("DSCT.TA", "Discount Bank", "Banking"),
+    ("PHOE.TA", "Phoenix Holdings", "Insurance"), ("HARL.TA", "Harel", "Insurance"),
+    ("BEZQ.TA", "Bezeq", "Telecom"), ("AZRG.TA", "Azrieli Group", "Real Estate"),
+    ("MLSR.TA", "Melisron", "Real Estate"), ("ELAL.TA", "El Al", "Aviation"),
+    ("DLEKG.TA", "Delek Group", "Energy")]),
+ "USA": ("^GSPC", "S&P 500", [
+    ("AAPL", "Apple", "Technology"), ("MSFT", "Microsoft", "Technology"),
+    ("NVDA", "NVIDIA", "Semiconductors"), ("GOOGL", "Alphabet", "Technology"),
+    ("AMZN", "Amazon", "Consumer/Cloud"), ("META", "Meta", "Technology"),
+    ("TSLA", "Tesla", "EV/Automotive"), ("BRK-B", "Berkshire", "Conglomerate"),
+    ("JPM", "JPMorgan", "Banking"), ("V", "Visa", "Payments"),
+    ("MA", "Mastercard", "Payments"), ("UNH", "UnitedHealth", "Healthcare"),
+    ("LLY", "Eli Lilly", "Pharma"), ("JNJ", "J&J", "Healthcare"),
+    ("XOM", "ExxonMobil", "Energy"), ("AVGO", "Broadcom", "Semiconductors"),
+    ("AMD", "AMD", "Semiconductors"), ("CRM", "Salesforce", "Software"),
+    ("NFLX", "Netflix", "Media"), ("HD", "Home Depot", "Retail"),
+    ("WMT", "Walmart", "Retail"), ("COST", "Costco", "Retail"),
+    ("PG", "P&G", "Consumer"), ("KO", "Coca-Cola", "Beverages"),
+    ("BAC", "Bank of America", "Banking")]),
+ "GBR": ("^FTSE", "FTSE 100", [
+    ("SHEL", "Shell", "Energy"), ("AZN", "AstraZeneca", "Healthcare"),
+    ("HSBC", "HSBC", "Banking"), ("BP", "BP", "Energy"),
+    ("UL", "Unilever", "Consumer"), ("GSK", "GSK", "Pharma"),
+    ("RIO", "Rio Tinto", "Mining"), ("BARC.L", "Barclays", "Banking"),
+    ("LLOY.L", "Lloyds", "Banking"), ("REL.L", "RELX", "Data/Analytics")]),
+ "DEU": ("^GDAXI", "DAX", [
+    ("SAP", "SAP", "Technology"), ("SIE.DE", "Siemens", "Industrials"),
+    ("DTE.DE", "Deutsche Telekom", "Telecom"), ("ALV.DE", "Allianz", "Insurance"),
+    ("MBG.DE", "Mercedes-Benz", "Automotive"), ("BMW.DE", "BMW", "Automotive"),
+    ("BAS.DE", "BASF", "Chemicals"), ("ADS.DE", "Adidas", "Consumer"),
+    ("IFX.DE", "Infineon", "Semiconductors"), ("DBK.DE", "Deutsche Bank", "Banking")]),
+ "FRA": ("^FCHI", "CAC 40", [
+    ("MC.PA", "LVMH", "Luxury"), ("TTE", "TotalEnergies", "Energy"),
+    ("OR.PA", "L'Oreal", "Consumer"), ("SNY", "Sanofi", "Healthcare"),
+    ("AIR.PA", "Airbus", "Aerospace"), ("BNP.PA", "BNP Paribas", "Banking"),
+    ("RMS.PA", "Hermes", "Luxury"), ("SU.PA", "Schneider Electric", "Industrials"),
+    ("DG.PA", "Vinci", "Construction"), ("KER.PA", "Kering", "Luxury")]),
+ "JPN": ("^N225", "Nikkei 225", [
+    ("TM", "Toyota", "Automotive"), ("SONY", "Sony", "Technology"),
+    ("MUFG", "MUFG", "Banking"), ("HMC", "Honda", "Automotive"),
+    ("NTDOY", "Nintendo", "Gaming"), ("SFTBY", "SoftBank", "Tech/Investment"),
+    ("SMFG", "SMFG", "Banking"), ("TAK", "Takeda", "Pharma"),
+    ("FANUY", "Fanuc", "Robotics"), ("MFG", "Mizuho", "Banking")]),
+ "CHN": ("000001.SS", "Shanghai Comp.", [
+    ("BABA", "Alibaba", "E-Commerce"), ("TCEHY", "Tencent", "Technology"),
+    ("PDD", "PDD Holdings", "E-Commerce"), ("BYDDY", "BYD", "EV/Automotive"),
+    ("JD", "JD.com", "E-Commerce"), ("BIDU", "Baidu", "Technology"),
+    ("NIO", "NIO", "EV/Automotive"), ("LI", "Li Auto", "EV/Automotive"),
+    ("NTES", "NetEase", "Gaming"), ("TME", "Tencent Music", "Media")]),
+ "IND": ("^BSESN", "SENSEX", [
+    ("RELIANCE.NS", "Reliance", "Conglomerate"), ("TCS.NS", "TCS", "IT Services"),
+    ("HDFCBANK.NS", "HDFC Bank", "Banking"), ("INFY", "Infosys", "IT Services"),
+    ("ICICIBANK.NS", "ICICI Bank", "Banking"), ("WIT", "Wipro", "IT Services"),
+    ("SBIN.NS", "SBI", "Banking"), ("BHARTIARTL.NS", "Bharti Airtel", "Telecom"),
+    ("LT.NS", "Larsen & Toubro", "Construction"), ("ADANIENT.NS", "Adani Ent.", "Conglomerate")]),
+ "BRA": ("^BVSP", "Bovespa", [
+    ("VALE", "Vale", "Mining"), ("PBR", "Petrobras", "Energy"),
+    ("ITUB", "Itau", "Banking"), ("ABEV", "Ambev", "Beverages"),
+    ("NU", "Nubank", "Fintech")]),
+ "CAN": ("^GSPTSE", "TSX", [
+    ("RY", "Royal Bank", "Banking"), ("TD", "TD Bank", "Banking"),
+    ("SHOP", "Shopify", "E-Commerce"), ("ENB", "Enbridge", "Energy"),
+    ("CNQ", "Canadian Natural", "Energy")]),
+ "AUS": ("^AXJO", "ASX 200", [
+    ("BHP", "BHP", "Mining"), ("CBA.AX", "CommBank", "Banking"),
+    ("CSL.AX", "CSL", "Biotech"), ("NAB.AX", "NAB", "Banking"),
+    ("WES.AX", "Wesfarmers", "Retail")]),
+ "KOR": ("^KS11", "KOSPI", [
+    ("005930.KS", "Samsung Elec.", "Technology"), ("000660.KS", "SK Hynix", "Semiconductors"),
+    ("005380.KS", "Hyundai Motor", "Automotive"), ("035420.KS", "Naver", "Internet"),
+    ("051910.KS", "LG Chem", "Chemicals")]),
+ "TWN": ("^TWII", "TAIEX", [
+    ("TSM", "TSMC", "Semiconductors"), ("2317.TW", "Hon Hai", "Electronics"),
+    ("2454.TW", "MediaTek", "Semiconductors"), ("UMC", "UMC", "Semiconductors"),
+    ("2308.TW", "Delta Electronics", "Electronics")]),
+ "SAU": ("^TASI.SR", "Tadawul", [
+    ("2222.SR", "Saudi Aramco", "Energy"), ("1120.SR", "Al Rajhi Bank", "Banking"),
+    ("2010.SR", "SABIC", "Chemicals"), ("7010.SR", "stc", "Telecom"),
+    ("1180.SR", "SNB", "Banking")]),
+ "TUR": ("XU100.IS", "BIST 100", [
+    ("THYAO.IS", "Turkish Airlines", "Aviation"), ("ASELS.IS", "Aselsan", "Defense"),
+    ("BIMAS.IS", "BIM", "Retail"), ("KCHOL.IS", "Koc Holding", "Conglomerate"),
+    ("GARAN.IS", "Garanti BBVA", "Banking")]),
+ "ITA": ("FTSEMIB.MI", "FTSE MIB", [
+    ("RACE", "Ferrari", "Luxury/Auto"), ("ENI.MI", "Eni", "Energy"),
+    ("ISP.MI", "Intesa Sanpaolo", "Banking"), ("UCG.MI", "UniCredit", "Banking"),
+    ("ENEL.MI", "Enel", "Utilities")]),
+ "ESP": ("^IBEX", "IBEX 35", [
+    ("SAN", "Santander", "Banking"), ("IBE.MC", "Iberdrola", "Utilities"),
+    ("ITX.MC", "Inditex", "Retail"), ("BBVA", "BBVA", "Banking"),
+    ("TEF", "Telefonica", "Telecom")]),
+ "NLD": ("^AEX", "AEX", [
+    ("ASML", "ASML", "Semiconductors"), ("PHG", "Philips", "HealthTech"),
+    ("ING", "ING", "Banking"), ("HEIA.AS", "Heineken", "Beverages"),
+    ("AD.AS", "Ahold Delhaize", "Retail")]),
+ "CHE": ("^SSMI", "SMI", [
+    ("NSRGY", "Nestle", "Consumer"), ("ROG.SW", "Roche", "Healthcare"),
+    ("NOVN.SW", "Novartis", "Healthcare"), ("UBS", "UBS", "Banking"),
+    ("ABBNY", "ABB", "Industrials")]),
+ "SWE": ("^OMX", "OMXS30", [
+    ("ERIC", "Ericsson", "Telecom"), ("VOLV-B.ST", "Volvo", "Automotive"),
+    ("ATCO-A.ST", "Atlas Copco", "Industrials"), ("SEB-A.ST", "SEB", "Banking"),
+    ("HM-B.ST", "H&M", "Retail")]),
+ "EGY": ("^CASE30", "EGX 30", []),
+ "GRC": ("GD.AT", "Athens GI", []),
+ "POL": ("WIG20.WA", "WIG20", []),
+ "MEX": ("^MXX", "IPC Mexico", []),
+ "ARG": ("^MERV", "Merval", []),
+ "IDN": ("^JKSE", "IDX Composite", []),
+ "PAK": ("^KSE", "KSE 100", []),
+}
+
+def _ww_market_build(iso):
+    """Blocking fetch of index + companies for one country. Returns dict."""
+    import yfinance as yf
+    entry = _WW_MARKETS.get(iso)
+    if not entry:
+        return {"iso": iso, "partial": True,
+                "note": "no market mapping for this country"}
+    idx_tkr, idx_name, comps = entry
+    out = {"iso": iso, "partial": False, "index": None,
+           "companies": [], "sectors": []}
+    # --- index: yearly growth over ~5y ---
+    try:
+        h = yf.Ticker(idx_tkr).history(period="5y", interval="1mo")
+        closes = {}
+        for ts, row in h.iterrows():
+            closes[ts.year] = float(row["Close"])   # last close seen per year
+        years = sorted(closes)
+        g_years, growth = [], []
+        for i in range(1, len(years)):
+            prev, cur = closes[years[i - 1]], closes[years[i]]
+            if prev:
+                g_years.append(years[i])
+                growth.append(round((cur / prev - 1) * 100, 1))
+        out["index"] = {"name": idx_name, "years": g_years, "growth": growth}
+    except Exception as e:
+        out["index_error"] = repr(e)[:120]
+    # --- companies ---
+    def _one(entry):
+        sym, name, sector = entry
+        c = {"sym": sym, "name": name, "sector": sector,
+             "mcap": None, "ytd": None, "yr1": None}
+        try:
+            t = yf.Ticker(sym)
+            try:
+                fi = t.fast_info
+                mc = None
+                for k in ("market_cap", "marketCap"):
+                    try:
+                        mc = fi[k]
+                        if mc:
+                            break
+                    except Exception:
+                        continue
+                if mc:
+                    _cur = None
+                    try:
+                        _cur = fi["currency"]
+                    except Exception:
+                        pass
+                    c["mcap"] = _cap_to_usd(mc, _cur)
+            except Exception:
+                pass
+            h = t.history(period="1y", interval="1wk")
+            if len(h):
+                first, last = float(h["Close"].iloc[0]), float(h["Close"].iloc[-1])
+                if first:
+                    c["yr1"] = round((last / first - 1) * 100, 1)
+                ynow = h.index[-1].year
+                hy = h[h.index.year == ynow]
+                if len(hy):
+                    f2 = float(hy["Close"].iloc[0])
+                    if f2:
+                        c["ytd"] = round((last / f2 - 1) * 100, 1)
+        except Exception:
+            pass
+        return c
+    import concurrent.futures as _cf
+    with _cf.ThreadPoolExecutor(max_workers=8) as _ex:
+        out["companies"] = list(_ex.map(_one, comps))
+    total_mcap, sec_mcap = 0.0, {}
+    for c in out["companies"]:
+        if c["mcap"]:
+            total_mcap += c["mcap"]
+            sec_mcap[c["sector"]] = sec_mcap.get(c["sector"], 0.0) + c["mcap"]
+    if total_mcap > 0:
+        out["sectors"] = [{"sector": s, "weight": round(v / total_mcap, 3)}
+                          for s, v in sorted(sec_mcap.items(),
+                                             key=lambda kv: -kv[1])]
+    if not out["companies"] and not out["index"]:
+        out["partial"] = True
+    return out
+
+def _ww_company_build(sym, iso):
+    """Blocking fetch of one company's detail sheet (price, stats, 1y series
+    normalized to 100 vs the national index, business description)."""
+    import yfinance as yf
+    t = yf.Ticker(sym)
+    out = {"sym": sym, "name": sym, "sector": ""}
+    entry = _WW_MARKETS.get(iso)
+    if entry:
+        for s, n, sec in entry[2]:
+            if s == sym:
+                out["name"], out["sector"] = n, sec
+                break
+    try:
+        fi = t.fast_info
+        def _g(*keys):
+            for k in keys:
+                try:
+                    v = fi[k]
+                    if v:
+                        return v
+                except Exception:
+                    continue
+            return None
+        out["price"] = _g("last_price", "lastPrice")
+        out["currency"] = _g("currency") or ""
+        out["mcap"] = _cap_to_usd(_g("market_cap", "marketCap"), out.get("currency"))
+        out["hi52"] = _g("year_high", "yearHigh")
+        out["lo52"] = _g("year_low", "yearLow")
+    except Exception:
+        pass
+    try:
+        info = t.info
+        out["pe"] = info.get("trailingPE")
+        out["volume"] = info.get("volume") or info.get("averageVolume")
+        out["employees"] = info.get("fullTimeEmployees")
+        out["desc"] = (info.get("longBusinessSummary") or "")[:900]
+    except Exception:
+        out.setdefault("desc", "")
+    try:
+        h = t.history(period="1y", interval="1d")
+        closes = [float(v) for v in h["Close"].tolist()]
+        dates = [ts.strftime("%Y-%m-%d") for ts in h.index]
+        step = max(1, len(closes) // 180)
+        closes, dates = closes[::step], dates[::step]
+        if closes and closes[0]:
+            out["series"] = {
+                "dates": dates,
+                "price": [round(v / closes[0] * 100, 2) for v in closes],
+                "price_abs": [round(v, 2) for v in closes],
+            }
+    except Exception:
+        pass
+    try:
+        if entry and out.get("series"):
+            ih = yf.Ticker(entry[0]).history(period="1y", interval="1d")
+            iv = [float(v) for v in ih["Close"].tolist()]
+            idt = [ts.strftime("%Y-%m-%d") for ts in ih.index]
+            m = dict(zip(idt, iv))
+            base, idx_series = None, []
+            for d in out["series"]["dates"]:
+                v = m.get(d)
+                if v is None:
+                    idx_series.append(None)
+                    continue
+                if base is None:
+                    base = v
+                idx_series.append(round(v / base * 100, 2))
+            out["series"]["index"] = idx_series
+            out["index_name"] = entry[1]
+    except Exception:
+        pass
+    return out
+# GDELT uses FIPS 10-4 country codes; the polygon file uses ISO3.
+_FIPS_TO_ISO3 = {
+ "AF":"AFG","AL":"ALB","AG":"DZA","AO":"AGO","AR":"ARG","AM":"ARM","AS":"AUS",
+ "AU":"AUT","AJ":"AZE","BA":"BHR","BG":"BGD","BO":"BLR","BE":"BEL","BH":"BLZ",
+ "BN":"BEN","BT":"BTN","BL":"BOL","BK":"BIH","BC":"BWA","BR":"BRA","BU":"BGR",
+ "UV":"BFA","BY":"BDI","CB":"KHM","CM":"CMR","CA":"CAN","CT":"CAF","CD":"TCD",
+ "CI":"CHL","CH":"CHN","CO":"COL","CG":"COD","CF":"COG","CS":"CRI","IV":"CIV",
+ "HR":"HRV","CU":"CUB","CY":"CYP","EZ":"CZE","DA":"DNK","DJ":"DJI","DR":"DOM",
+ "EC":"ECU","EG":"EGY","ES":"SLV","EK":"GNQ","ER":"ERI","EN":"EST","ET":"ETH",
+ "FI":"FIN","FR":"FRA","GB":"GAB","GA":"GMB","GG":"GEO","GM":"DEU","GH":"GHA",
+ "GR":"GRC","GT":"GTM","GV":"GIN","PU":"GNB","GY":"GUY","HA":"HTI","HO":"HND",
+ "HU":"HUN","IC":"ISL","IN":"IND","ID":"IDN","IR":"IRN","IZ":"IRQ","EI":"IRL",
+ "IS":"ISR","IT":"ITA","JM":"JAM","JA":"JPN","JO":"JOR","KZ":"KAZ","KE":"KEN",
+ "KN":"PRK","KS":"KOR","KU":"KWT","KG":"KGZ","LA":"LAO","LG":"LVA","LE":"LBN",
+ "LT":"LSO","LI":"LBR","LY":"LBY","LH":"LTU","LU":"LUX","MK":"MKD","MA":"MDG",
+ "MI":"MWI","MY":"MYS","ML":"MLI","MR":"MRT","MX":"MEX","MD":"MDA","MG":"MNG",
+ "MJ":"MNE","MO":"MAR","MZ":"MOZ","BM":"MMR","WA":"NAM","NP":"NPL","NL":"NLD",
+ "NZ":"NZL","NU":"NIC","NG":"NER","NI":"NGA","NO":"NOR","MU":"OMN","PK":"PAK",
+ "PM":"PAN","PP":"PNG","PA":"PRY","PE":"PER","RP":"PHL","PL":"POL","PO":"PRT",
+ "QA":"QAT","RO":"ROU","RS":"RUS","RW":"RWA","SA":"SAU","SG":"SEN","RI":"SRB",
+ "SL":"SLE","SN":"SGP","LO":"SVK","SI":"SVN","SO":"SOM","SF":"ZAF","OD":"SSD",
+ "SP":"ESP","CE":"LKA","SU":"SDN","NS":"SUR","SW":"SWE","SZ":"CHE","SY":"SYR",
+ "TW":"TWN","TI":"TJK","TZ":"TZA","TH":"THA","TO":"TGO","TD":"TTO","TS":"TUN",
+ "TU":"TUR","TX":"TKM","UG":"UGA","UP":"UKR","AE":"ARE","UK":"GBR","US":"USA",
+ "UY":"URY","UZ":"UZB","VE":"VEN","VM":"VNM","YM":"YEM","ZA":"ZMB","ZI":"ZWE",
+ "WE":"PSE","GZ":"PSE",
+}
+
+_warwatch_headline_cache = {}   # url -> {"title","domain","author","ts"}
+_warwatch_headline_lock = threading.Lock()
+_WW_HEADLINE_TTL = 24 * 3600
+_WW_HEADLINE_MAX_BYTES = 180_000   # enough for <head> even on heavy pages
+
+
+def _ww_unfurl_one(url):
+    """One URL -> {"url","domain","title","author","error"}. Never raises -
+    every failure mode (timeout, non-200, no parseable title, blocked bot
+    UA) degrades to a domain-only result, exactly like the existing
+    graceful-degradation pattern used throughout this file."""
+    import re as _re
+    try:
+        dom = urllib.parse.urlparse(url).netloc or url
+    except Exception:
+        dom = url
+    with _warwatch_headline_lock:
+        hit = _warwatch_headline_cache.get(url)
+        if hit and (time.time() - hit["ts"]) < _WW_HEADLINE_TTL:
+            return {"url": url, "domain": dom, "title": hit["title"],
+                    "author": hit["author"], "error": None}
+    title = author = None
+    err = None
+    try:
+        req = urllib.request.Request(url, headers={
+            "User-Agent": ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                          "AppleWebKit/537.36 (KHTML, like Gecko) "
+                          "Chrome/124.0 Safari/537.36")})
+        with urllib.request.urlopen(req, timeout=6) as r:
+            raw = r.read(_WW_HEADLINE_MAX_BYTES)
+        html = raw.decode("utf-8", "replace")
+        m = _re.search(
+            r'<meta[^>]+property=["\']og:title["\'][^>]+content=["\']([^"\']+)',
+            html, _re.I)
+        if m:
+            title = m.group(1).strip()
+        if not title:
+            m = _re.search(r"<title[^>]*>([^<]+)</title>", html, _re.I)
+            if m:
+                title = m.group(1).strip()
+        ma = _re.search(
+            r'<meta[^>]+(?:name=["\']author["\']|property=["\']article:author["\'])'
+            r'[^>]+content=["\']([^"\']+)', html, _re.I)
+        if ma:
+            author = ma.group(1).strip()
+        if title:
+            import html as _htmllib
+            title = _htmllib.unescape(title)[:200]
+        if author:
+            import html as _htmllib
+            author = _htmllib.unescape(author)[:80]
+    except Exception as e:
+        err = "%s: %s" % (type(e).__name__, str(e)[:60])
+    if err is None:
+        # Only cache real successes - caching a failure would make
+        # every future call for this URL silently report error=None,
+        # hiding a fetch problem that might be transient.
+        with _warwatch_headline_lock:
+            _warwatch_headline_cache[url] = {"title": title, "author": author,
+                                             "ts": time.time()}
+    return {"url": url, "domain": dom, "title": title, "author": author,
+            "error": err}
+
+
+def _warwatch_headlines_worker(urls, out, idx):
+    out[idx] = _ww_unfurl_one(urls[idx])
+
+
+def _warwatch_headlines_for(urls):
+    """Unfurl up to 3 URLs in parallel (bounded - this is a small, known-
+    size batch per cluster, not a crawl). Order preserved."""
+    urls = [u for u in (urls or []) if u][:3]
+    if not urls:
+        return []
+    out = [None] * len(urls)
+    threads = [threading.Thread(target=_warwatch_headlines_worker,
+                                args=(urls, out, i), daemon=True)
+               for i in range(len(urls))]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=8)
+    return [r for r in out if r is not None]
+
+
+def _warwatch_ingest_zip(zip_url):
+    """Download one GDELT 15-min export zip and fold conflict events into
+    _warwatch. Returns the number of events added/refreshed."""
+    import zipfile, io as _io
+    req = urllib.request.Request(zip_url,
+                                 headers={"User-Agent": "JARVIS-WorldView/1.0"})
+    with urllib.request.urlopen(req, timeout=30) as r:
+        blob = r.read()
+    added = 0
+    with zipfile.ZipFile(_io.BytesIO(blob)) as zf:
+        name = zf.namelist()[0]
+        with zf.open(name) as fh:
+            for raw in fh:
+                try:
+                    cols = raw.decode("utf-8", "replace").rstrip("\r\n").split("\t")
+                    # GDELT 2.0 event table: 61 tab-separated columns.
+                    # 28=EventRootCode, 52=ActionGeo_FullName, 56/57=ActionGeo
+                    # Lat/Long, 33=NumArticles, 34=AvgTone, 1=SQLDATE, 60=SOURCEURL
+                    if len(cols) < 61:
+                        continue
+                    _root = cols[28]
+                    if _root in _WARWATCH_CODES:
+                        _cat = "armed"
+                    elif _root in _WW_UNREST_CODES:
+                        _cat = "unrest"
+                    else:
+                        continue
+                    if not cols[56] or not cols[57]:
+                        continue
+                    ev = {
+                        "lat": float(cols[56]), "lon": float(cols[57]),
+                        "name": cols[52] or "Unknown location",
+                        "code": cols[28],
+                        "tone": float(cols[34]) if cols[34] else 0.0,
+                        "articles": int(cols[33]) if cols[33] else 1,
+                        "date": cols[1],
+                        "url": cols[60],
+                        "fips": cols[53],
+                        "cat": _cat,
+                        "ts": time.time(),
+                    }
+                    with _warwatch_lock:
+                        _warwatch[cols[0]] = ev
+                    added += 1
+                except Exception:
+                    continue
+    return added
+
+def _warwatch_refresher():
+    """Daemon loop: backfill ~2h of GDELT updates, then poll lastupdate.txt
+    every 5 minutes. Prunes events older than 24h. Never raises."""
+    try:
+        now = datetime.datetime.now(datetime.timezone.utc)
+        base = now.replace(minute=(now.minute // 15) * 15, second=0, microsecond=0)
+        for i in range(9, 1, -1):
+            t = base - datetime.timedelta(minutes=15 * i)
+            url = ("http://data.gdeltproject.org/gdeltv2/%s.export.CSV.zip"
+                   % t.strftime("%Y%m%d%H%M%S"))
+            try:
+                _warwatch_ingest_zip(url)
+                _warwatch_status.update({"state": "ok", "last_fetch": time.time()})
+            except Exception as e:
+                _warwatch_status["last_error"] = "backfill: %r" % (e,)
+    except Exception as e:
+        _warwatch_status["last_error"] = "backfill setup: %r" % (e,)
+    last_url = ""
+    while True:
+        try:
+            req = urllib.request.Request(
+                "http://data.gdeltproject.org/gdeltv2/lastupdate.txt",
+                headers={"User-Agent": "JARVIS-WorldView/1.0"})
+            with urllib.request.urlopen(req, timeout=15) as r:
+                txt = r.read().decode("utf-8", "replace")
+            url = ""
+            for line in txt.splitlines():
+                parts = line.split()
+                if parts and parts[-1].endswith(".export.CSV.zip"):
+                    url = parts[-1]
+                    break
+            if url and url != last_url:
+                _warwatch_ingest_zip(url)
+                last_url = url
+                _warwatch_status.update({"state": "ok",
+                                         "last_fetch": time.time(),
+                                         "last_error": ""})
+            cutoff = time.time() - _WARWATCH_TTL
+            with _warwatch_lock:
+                dead = [k for k, v in _warwatch.items() if v["ts"] < cutoff]
+                for k in dead:
+                    _warwatch.pop(k, None)
+        except Exception as e:
+            _warwatch_status["last_error"] = repr(e)
+        time.sleep(300)
+
+def _start_warwatch_relay():
+    """Start the GDELT conflict-events relay on a daemon thread. Idempotent."""
+    global _warwatch_relay_started
+    with _warwatch_relay_lock:
+        if _warwatch_relay_started:
+            return
+        threading.Thread(target=_warwatch_refresher, daemon=True,
+                         name="jarvis-warwatch-relay").start()
+        _warwatch_relay_started = True
+        _warwatch_status["state"] = "starting (backfilling last 2h)"
+        print("[diag] warwatch relay started (GDELT v2 event stream)")
+
+
+# ---------------------------------------------------------------------------
+# Matterhorn Quant status bridge (v5.5). scripts/run_live.py writes
+# status/quant_status.json inside the quant repo; this relay finds it and
+# serves it at GET /quant so the Aleph QUANT tab can render live results.
+# ---------------------------------------------------------------------------
+_quant_cache = {"data": None, "ts": 0.0, "path": None}
+_QUANT_TTL = 15  # seconds
+
+def _audit_find_latest():
+    """Return the newest logs/audit*.jsonl next to a quant_status.json, or None."""
+    import glob
+    status = _quant_find_status()
+    candidates = []
+    if status:
+        logs_dir = os.path.join(os.path.dirname(os.path.dirname(status)), "logs")
+        candidates.extend(glob.glob(os.path.join(logs_dir, "audit*.jsonl")))
+    if not candidates:
+        home = os.path.expanduser("~")
+        try:
+            candidates = glob.glob(os.path.join(home, "**", "logs", "audit*.jsonl"),
+                                   recursive=True)
+        except Exception:
+            candidates = []
+    if not candidates:
+        return None
+    small = [c for c in candidates if "audit_small" in os.path.basename(c)]
+    if small:
+        candidates = small
+    try:
+        return max(candidates, key=os.path.getmtime)
+    except Exception:
+        return candidates[0]
+
+_ACTIVITY_LABELS = {
+    "decision": lambda p: "\u05d4\u05d7\u05dc\u05d8\u05d4 \u00b7 " + p.get("symbol", "?")
+        + ": \u05e6\u05d9\u05d5\u05df %+.2f \u05d1\u05d9\u05d8\u05d7\u05d5\u05df %.2f" % (
+            p.get("score", 0), p.get("confidence", 0)),
+    "fill": lambda p: ("\u05e7\u05e0\u05d9\u05d9\u05d4" if p.get("side") == "buy" else "\u05de\u05db\u05d9\u05e8\u05d4")
+        + " \u00b7 %s: %.0f \u05d9\u05d7\u05d9\u05d3\u05d5\u05ea \u05d1-%.2f$" % (
+            p.get("symbol", "?"), p.get("qty", 0), p.get("price", 0)),
+    "risk_event": lambda p: "\u05e1\u05d9\u05db\u05d5\u05df \u00b7 " + str(p.get("note", "")),
+    "learning_update": lambda p: ("\u05dc\u05de\u05d9\u05d3\u05d4 \u00b7 %s: %.2f\u2192%.2f (%s)" % (
+        p.get("strategy", "?"), p.get("old_weight", 0), p.get("new_weight", 0),
+        "\u05e6\u05d3\u05e7" if p.get("signal_hit") else "\u05d8\u05e2\u05d4")),
+    "eod_risk_review": lambda p: ("\u05e1\u05d9\u05db\u05d5\u05dd \u05d9\u05d5\u05de\u05d9 \u00b7 \u05d4\u05d5\u05df %.0f$ \u00b7 \u05d9\u05e8\u05d9\u05d3\u05d4 %.1f%% \u00b7 VaR %.1f%%" % (
+        p.get("equity", 0), p.get("drawdown", 0) * 100, p.get("portfolio_var", 0) * 100)),
+    "symbol_blacklist": lambda p: ("\u05d4\u05e8\u05d7\u05e7\u05d4 \u00b7 %s: " % p.get("symbol", "?"))
+        + (("\u05d4\u05d5\u05e8\u05d7\u05e7 \u05dc\u05e1\u05e4\u05e1\u05dc \u05dc-%d \u05d9\u05de\u05d9 \u05de\u05e1\u05d7\u05e8 (\u05ea\u05d5\u05e6\u05d0\u05d5\u05ea \u05e9\u05d2\u05d5\u05d9\u05d5\u05ea \u05d7\u05d5\u05d6\u05e8\u05d5\u05ea)"
+            % p.get("cooldown_bars", 0)) if p.get("action") == "benched"
+           else "\u05d4\u05d5\u05d7\u05d6\u05e8 \u05dc\u05de\u05e1\u05d7\u05e8 (\u05e1\u05d9\u05d5\u05dd \u05e6\u05d9\u05e0\u05d5\u05df)"),
+}
+
+def _quant_find_status():
+    """Return the newest quant_status.json across likely locations, or None."""
+    import glob
+    home = os.path.expanduser("~")
+    patterns = [
+        os.path.join(home, "Desktop", "quant", "**", "status", "quant_status.json"),
+        os.path.join(home, "Downloads", "**", "status", "quant_status.json"),
+        os.path.join(home, "**", "matterhorn*", "**", "status", "quant_status.json"),
+        os.path.join(home, "**", "quant_status.json"),
+    ]
+    hits = []
+    for pat in patterns:
+        try:
+            hits.extend(glob.glob(pat, recursive=True))
+        except Exception:
+            continue
+        if hits:
+            break
+    if not hits:
+        return None
+    try:
+        return max(hits, key=os.path.getmtime)
+    except Exception:
+        return hits[0]
 
 
 class _FlightsProxyHandler(http.server.BaseHTTPRequestHandler):
     def _cors_headers(self):
         self.send_header("Access-Control-Allow-Origin", "*")
-        self.send_header("Access-Control-Allow-Methods", "GET")
+        self.send_header("Access-Control-Allow-Methods", "GET, POST")
+        self.send_header("Access-Control-Allow-Headers", "Content-Type")
         self.send_header("Cache-Control", "no-store")
 
     def do_OPTIONS(self):
@@ -1954,6 +3064,16 @@ class _FlightsProxyHandler(http.server.BaseHTTPRequestHandler):
         self.send_response(204)
         self._cors_headers()
         self.end_headers()
+
+    def do_POST(self):
+        parsed = urllib.parse.urlparse(self.path)
+        if parsed.path == "/training_photo":
+            self._handle_training_photo()
+            return
+        if parsed.path == "/geoloc_photo":
+            self._handle_geoloc_photo()
+            return
+        self._json_out({"ok": False, "error": "not found"}, 404)
 
     def do_GET(self):
         parsed = urllib.parse.urlparse(self.path)
@@ -1972,8 +3092,110 @@ class _FlightsProxyHandler(http.server.BaseHTTPRequestHandler):
         if parsed.path == "/ask":
             self._handle_ask(parsed)
             return
+        if parsed.path in ("/training", "/training_weight",
+                           "/training_workout", "/training_import"):
+            self._handle_training(parsed)
+            return
+        if parsed.path in ("/calendar", "/calendar_add"):
+            self._handle_calendar(parsed)
+            return
+        if parsed.path == "/briefing_audio":
+            self._handle_briefing_audio(parsed)
+            return
+        if parsed.path == "/briefing":
+            self._handle_briefing(parsed)
+            return
         if parsed.path in ("/todo", "/todo_add", "/todo_toggle", "/todo_del"):
             self._handle_todo(parsed)
+            return
+        # --- Quant bot activity feed, human-readable (v5.9) -----------------
+        if parsed.path == "/quant_activity":
+            try:
+                import json as _json
+                params = urllib.parse.parse_qs(parsed.query)
+                limit = min(int((params.get("limit", ["60"])[0]) or 60), 300)
+                path = _audit_find_latest()
+                items = []
+                if path and os.path.exists(path):
+                    with open(path, "r", encoding="utf-8") as fh:
+                        lines = fh.readlines()
+                    for line in lines[-limit:]:
+                        try:
+                            e = _json.loads(line)
+                            fmt = _ACTIVITY_LABELS.get(e.get("type"))
+                            text = fmt(e.get("payload", {})) if fmt else str(e.get("type"))
+                        except Exception:
+                            continue
+                        _pl = e.get("payload", {}) or {}
+                        items.append({"ts": e.get("ts"), "type": e.get("type"), "text": text,
+                                      "date": _pl.get("date", ""),
+                                      "detail": (_pl.get("reasoning") or "")[:600]})
+                    items.reverse()  # newest first
+                payload = _json.dumps({
+                    "available": bool(path), "source_path": path or "",
+                    "items": items,
+                    "note": None if path else "No audit log found yet. Run scripts/run_live.py "
+                                              "or run_small.py to generate one.",
+                }).encode("utf-8")
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self._cors_headers()
+                self.send_header("Content-Length", str(len(payload)))
+                self.end_headers()
+                self.wfile.write(payload)
+            except Exception as _e:
+                try:
+                    body = ('{"available":false,"items":[],"note":' + json.dumps(str(_e)) + '}').encode("utf-8")
+                    self.send_response(200)
+                    self.send_header("Content-Type", "application/json")
+                    self._cors_headers()
+                    self.end_headers()
+                    self.wfile.write(body)
+                except Exception:
+                    pass
+            return
+        # --- Matterhorn Quant status (v5.5) --------------------------------
+        if parsed.path == "/quant":
+            try:
+                import json as _json
+                now = time.time()
+                if _quant_cache["data"] is not None and now - _quant_cache["ts"] < _QUANT_TTL:
+                    body = _quant_cache["data"]
+                else:
+                    path = _quant_find_status()
+                    if path and os.path.exists(path):
+                        with open(path, "r", encoding="utf-8") as fh:
+                            data = _json.load(fh)
+                        data["available"] = True
+                        data["_source_path"] = path
+                        body = _json.dumps(data).encode("utf-8")
+                    else:
+                        body = _json.dumps({
+                            "available": False,
+                            "message": ("No quant_status.json found yet. Run "
+                                        "scripts/run_live.py in the Matterhorn "
+                                        "Quant repo to generate it."),
+                        }).encode("utf-8")
+                    _quant_cache.update({"data": body, "ts": now, "path": path})
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self._cors_headers()
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+            except Exception as _e:
+                try:
+                    err = ('{"available":false,"message":'
+                           + json.dumps("quant bridge error: " + str(_e))
+                           + "}").encode("utf-8")
+                    self.send_response(200)
+                    self.send_header("Content-Type", "application/json")
+                    self._cors_headers()
+                    self.send_header("Content-Length", str(len(err)))
+                    self.end_headers()
+                    self.wfile.write(err)
+                except Exception:
+                    pass
             return
         # --- WorldView API keys endpoint (wv_keys_endpoint) ----------------
         if parsed.path == "/keys":
@@ -1995,6 +3217,349 @@ class _FlightsProxyHandler(http.server.BaseHTTPRequestHandler):
                 except Exception:
                     pass
             return
+        # --- Country facts, proxied + cached (v4.99) ------------------------
+        if parsed.path == "/facts":
+            try:
+                import json as _json
+                params = urllib.parse.parse_qs(parsed.query)
+                iso = (params.get("iso", [""])[0] or "").strip().upper()[:3]
+                if not iso:
+                    raise ValueError("no iso")
+                c = _ww_facts.get(iso)
+                if not c or time.time() - c["ts"] > _WW_FACTS_TTL:
+                    data = _wb_facts(iso)
+                    _ts = time.time()
+                    if not (data.get("population") and data.get("gdp")):
+                        _ts = _ts - _WW_FACTS_TTL + 600
+                    _ww_facts[iso] = {"data": data, "ts": _ts}
+                    c = _ww_facts[iso]
+                payload = _json.dumps(c["data"]).encode("utf-8")
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self._cors_headers()
+                self.send_header("Content-Length", str(len(payload)))
+                self.end_headers()
+                self.wfile.write(payload)
+            except Exception as _e:
+                try:
+                    body = ('{"error":' + json.dumps(str(_e)) + '}').encode("utf-8")
+                    self.send_response(502)
+                    self.send_header("Content-Type", "application/json")
+                    self._cors_headers()
+                    self.end_headers()
+                    self.wfile.write(body)
+                except Exception:
+                    pass
+            return
+        # --- HERMES MKT tab: real quotes, cached ~45s (v5.7) ----------------
+        if parsed.path == "/quotes":
+            try:
+                import json as _json
+                now = time.time()
+                with _quotes_lock:
+                    if _quotes_cache["data"] is None or now - _quotes_cache["ts"] > _QUOTES_TTL:
+                        try:
+                            data = _quotes_build()
+                        except Exception as _e:
+                            data = {}
+                        _quotes_cache.update({"data": data, "ts": now})
+                    quotes = _quotes_cache["data"]
+                payload = _json.dumps({"quotes": quotes, "ts": _quotes_cache["ts"],
+                                       "covered": len(quotes)}).encode("utf-8")
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self._cors_headers()
+                self.send_header("Content-Length", str(len(payload)))
+                self.end_headers()
+                self.wfile.write(payload)
+            except Exception as _e:
+                try:
+                    body = ('{"quotes":{},"error":' + json.dumps(str(_e)) + '}').encode("utf-8")
+                    self.send_response(200)
+                    self.send_header("Content-Type", "application/json")
+                    self._cors_headers()
+                    self.end_headers()
+                    self.wfile.write(body)
+                except Exception:
+                    pass
+            return
+        # --- Single-company detail sheet, cached 6h (v5.0) -------------------
+        if parsed.path == "/company":
+            try:
+                import json as _json, re as _re
+                params = urllib.parse.parse_qs(parsed.query)
+                sym = (params.get("sym", [""])[0] or "").strip()[:16]
+                iso = (params.get("iso", [""])[0] or "").strip().upper()[:3]
+                if not sym or not _re.match(r"^[A-Za-z0-9.\-^]{1,16}$", sym):
+                    raise ValueError("bad symbol")
+                c = _ww_company.get(sym)
+                if not c or time.time() - c["ts"] > _WW_COMPANY_TTL:
+                    with _ww_company_lock:
+                        c = _ww_company.get(sym)
+                        if not c or time.time() - c["ts"] > _WW_COMPANY_TTL:
+                            try:
+                                data = _ww_company_build(sym, iso)
+                            except ImportError:
+                                data = {"error": "yfinance not installed"}
+                            _ww_company[sym] = {"data": data, "ts": time.time()}
+                            c = _ww_company[sym]
+                payload = _json.dumps(c["data"]).encode("utf-8")
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self._cors_headers()
+                self.send_header("Content-Length", str(len(payload)))
+                self.end_headers()
+                self.wfile.write(payload)
+            except Exception as _e:
+                try:
+                    body = ('{"error":' + json.dumps(str(_e)) + '}').encode("utf-8")
+                    self.send_response(502)
+                    self.send_header("Content-Type", "application/json")
+                    self._cors_headers()
+                    self.end_headers()
+                    self.wfile.write(body)
+                except Exception:
+                    pass
+            return
+        # --- Country market data via yfinance, cached 6h (v4.99) ------------
+        if parsed.path == "/market":
+            try:
+                import json as _json
+                params = urllib.parse.parse_qs(parsed.query)
+                iso = (params.get("iso", [""])[0] or "").strip().upper()[:3]
+                if not iso:
+                    raise ValueError("no iso")
+                c = _ww_market.get(iso)
+                if not c or time.time() - c["ts"] > _WW_MARKET_TTL:
+                    with _ww_market_lock:
+                        c = _ww_market.get(iso)
+                        if not c or time.time() - c["ts"] > _WW_MARKET_TTL:
+                            try:
+                                data = _ww_market_build(iso)
+                            except ImportError:
+                                data = {"iso": iso, "partial": True,
+                                        "note": "yfinance not installed - run: pip install yfinance"}
+                            _ww_market[iso] = {"data": data, "ts": time.time()}
+                            c = _ww_market[iso]
+                payload = _json.dumps(c["data"]).encode("utf-8")
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self._cors_headers()
+                self.send_header("Content-Length", str(len(payload)))
+                self.end_headers()
+                self.wfile.write(payload)
+            except Exception as _e:
+                try:
+                    body = ('{"error":' + json.dumps(str(_e)) + '}').encode("utf-8")
+                    self.send_response(502)
+                    self.send_header("Content-Type", "application/json")
+                    self._cors_headers()
+                    self.end_headers()
+                    self.wfile.write(body)
+                except Exception:
+                    pass
+            return
+        # --- WARWATCH v36: real headline unfurl for the intel card ------
+        # NOT a new GDELT query - GDELT's spatial GEO 2.0 API is already
+        # retired (see the WARWATCH relay comment above). This fetches the
+        # article page for URLs the relay ALREADY has for a cluster and
+        # reads just the <title>/og:title (+ author meta if present) -
+        # the same "link unfurl" technique Slack/WhatsApp use for
+        # previews. Exact match to the sources already shown, not a
+        # fuzzy re-search.
+        # --- WorldView CAMERAS: Windy webcams proxy (see _handle_webcams) --
+        # --- SCOUTING property card: GovMap parcel + transactions (v5.21) --
+        if parsed.path == "/property":
+            self._handle_property(parsed)
+            return
+        if parsed.path == "/webcams":
+            self._handle_webcams(parsed)
+            return
+        if parsed.path == "/warwatch_headlines":
+            self._handle_warwatch_headlines(parsed)
+            return
+        # --- WorldView WARWATCH country tension tiers (v4.97) ---------------
+        if parsed.path == "/warwatch_countries":
+            try:
+                import json as _json
+                agg = {}
+                with _warwatch_lock:
+                    evs = list(_warwatch.values())
+                for ev in evs:
+                    iso = _FIPS_TO_ISO3.get(ev.get("fips", ""), "")
+                    if not iso:
+                        continue
+                    a = agg.setdefault(iso, {"14": 0, "18": 0, "19": 0, "20": 0})
+                    code = ev.get("code", "18")
+                    a[code] = a.get(code, 0) + 1
+                out = []
+                for iso, a in agg.items():
+                    war = a.get("19", 0) + a.get("20", 0)
+                    assault = a.get("18", 0)
+                    unrest = a.get("14", 0)
+                    tier = 0
+                    if war >= _WW_RED_WAR:
+                        tier = 2
+                    elif (war >= _WW_ORANGE_WAR
+                          or assault >= _WW_ORANGE_ASSAULT
+                          or unrest >= _WW_ORANGE_UNREST):
+                        tier = 1
+                    if tier:
+                        out.append({"iso3": iso, "tier": tier,
+                                    "war": war,
+                                    "armed": war + assault,
+                                    "unrest": unrest})
+                payload = _json.dumps({"countries": out,
+                                       "status": dict(_warwatch_status)}).encode("utf-8")
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self._cors_headers()
+                self.send_header("Content-Length", str(len(payload)))
+                self.end_headers()
+                self.wfile.write(payload)
+            except Exception as _e:
+                try:
+                    self.send_response(502); self._cors_headers(); self.end_headers()
+                except Exception:
+                    pass
+            return
+        # --- World country polygons, cached on disk (v4.97) -----------------
+        if parsed.path == "/countries":
+            try:
+                cpath = Path(__file__).resolve().parent / "countries.geo.json"
+                if not cpath.exists():
+                    req = urllib.request.Request(
+                        "https://cdn.jsdelivr.net/gh/johan/world.geo.json@master/countries.geo.json",
+                        headers={"User-Agent": "JARVIS-WorldView/1.0"})
+                    with urllib.request.urlopen(req, timeout=30) as r:
+                        cpath.write_bytes(r.read())
+                data = cpath.read_bytes()
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self._cors_headers()
+                self.send_header("Content-Length", str(len(data)))
+                self.end_headers()
+                self.wfile.write(data)
+            except Exception as _e:
+                try:
+                    self.send_response(502); self._cors_headers(); self.end_headers()
+                except Exception:
+                    pass
+            return
+        # --- AI country brief, 24h cache (v4.97) ----------------------------
+        if parsed.path == "/country_brief":
+            try:
+                import json as _json
+                params = urllib.parse.parse_qs(parsed.query)
+                iso = (params.get("iso", [""])[0] or "").strip().upper()[:3]
+                cname = (params.get("name", [""])[0] or iso).strip()[:60]
+                if not iso:
+                    raise ValueError("no iso")
+                now = time.time()
+                cached = _ww_briefs.get(iso)
+                if cached and now - cached["ts"] < _WW_BRIEF_TTL:
+                    text, was_cached = cached["text"], True
+                else:
+                    with _ww_brief_lock:
+                        cached = _ww_briefs.get(iso)
+                        if cached and time.time() - cached["ts"] < _WW_BRIEF_TTL:
+                            text, was_cached = cached["text"], True
+                        else:
+                            client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY,
+                                                          timeout=60.0)
+                            resp = client.messages.create(
+                                model="claude-opus-5",
+                                max_tokens=600,
+                                messages=[{"role": "user", "content":
+                                    "אתה מודול המודיעין של JARVIS. כתוב תקציר מודיעיני קומפקטי בעברית על "
+                                    + cname +
+                                    " בשלושה חלקים עם כותרות: 1) מצב כלכלי נוכחי "
+                                    "2) חברות/סקטורים צומחים בולטים 3) מצב צבאי-ביטחוני. "
+                                    "עד 180 מילים סה\"כ. בלי הקדמות ובלי סיכום. "
+                                    "אם המידע שלך עשוי להיות לא עדכני - ציין זאת בשורה האחרונה."}],
+                            )
+                            text = "".join(b.text for b in resp.content
+                                           if getattr(b, "type", "") == "text").strip()
+                            _ww_briefs[iso] = {"text": text, "ts": time.time()}
+                            was_cached = False
+                payload = _json.dumps({"brief": text,
+                                       "cached": was_cached}).encode("utf-8")
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self._cors_headers()
+                self.send_header("Content-Length", str(len(payload)))
+                self.end_headers()
+                self.wfile.write(payload)
+            except Exception as _e:
+                try:
+                    body = ('{"error":' + json.dumps(str(_e)) + '}').encode("utf-8")
+                    self.send_response(502)
+                    self.send_header("Content-Type", "application/json")
+                    self._cors_headers()
+                    self.end_headers()
+                    self.wfile.write(body)
+                except Exception:
+                    pass
+            return
+        # --- WorldView WARWATCH conflict events (v4.96) ---------------------
+        if parsed.path == "/warwatch":
+            try:
+                import json as _json
+                clusters = {}
+                with _warwatch_lock:
+                    evs = [v for v in _warwatch.values()
+                           if v.get("cat", "armed") == "armed"]
+                for ev in evs:
+                    key = (round(ev["lat"], 1), round(ev["lon"], 1))
+                    c = clusters.get(key)
+                    if c is None:
+                        c = {"lat": ev["lat"], "lon": ev["lon"],
+                             "name": ev["name"], "count": 0, "urls": []}
+                        clusters[key] = c
+                    c["count"] += 1
+                    if ev["url"] and len(c["urls"]) < 3 and ev["url"] not in c["urls"]:
+                        c["urls"].append(ev["url"])
+                feats = []
+                for c in clusters.values():
+                    links = ""
+                    for u in c["urls"]:
+                        try:
+                            dom = urllib.parse.urlparse(u).netloc or u
+                        except Exception:
+                            dom = u
+                        links += ('<a href="%s" target="_blank" '
+                                  'rel="noopener">%s</a><br>' % (u, dom))
+                    feats.append({
+                        "type": "Feature",
+                        "geometry": {"type": "Point",
+                                     "coordinates": [c["lon"], c["lat"]]},
+                        "properties": {"name": c["name"], "count": c["count"],
+                                       "html": links,
+                                       "urls": c["urls"]},
+                    })
+                payload = _json.dumps({
+                    "type": "FeatureCollection", "features": feats,
+                    "status": dict(_warwatch_status),
+                }).encode("utf-8")
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self._cors_headers()
+                self.send_header("Content-Length", str(len(payload)))
+                self.end_headers()
+                self.wfile.write(payload)
+            except Exception as _e:
+                try:
+                    body = ('{"error":' + json.dumps(str(_e))
+                            + ',"type":"FeatureCollection","features":[]}'
+                            ).encode("utf-8")
+                    self.send_response(502)
+                    self.send_header("Content-Type", "application/json")
+                    self._cors_headers()
+                    self.end_headers()
+                    self.wfile.write(body)
+                except Exception:
+                    pass
+            return
         # --- WorldView VESSELS snapshot (v4.66) ----------------------------
         if parsed.path == "/vessels":
             try:
@@ -2009,7 +3574,8 @@ class _FlightsProxyHandler(http.server.BaseHTTPRequestHandler):
                     for m in stale:
                         _vessels.pop(m, None)
                 payload = _json.dumps({"vessels": items,
-                                       "count": len(items)}).encode("utf-8")
+                                       "count": len(items),
+                                       "status": dict(_vessels_status)}).encode("utf-8")
                 self.send_response(200)
                 self.send_header("Content-Type", "application/json")
                 self._cors_headers()
@@ -2057,6 +3623,148 @@ class _FlightsProxyHandler(http.server.BaseHTTPRequestHandler):
                 body = (
                     '{"error":' + json.dumps(str(e)) + ',"ac":[]}'
                 ).encode("utf-8")
+                self.send_response(502)
+                self.send_header("Content-Type", "application/json")
+                self._cors_headers()
+                self.end_headers()
+                self.wfile.write(body)
+            except Exception:
+                pass
+
+    def _handle_property(self, parsed):
+        # SCOUTING property card: GET /property?lat=&lon=[&radius=][&address=]
+        # Mirrors /webcams: validate before any upstream URL is built, clamp
+        # the range, answer with structured JSON on every path including
+        # failure, and set CORS everywhere because the page is served from
+        # :7777 while this is :7778.
+        try:
+            params = urllib.parse.parse_qs(parsed.query)
+            lat = float(params.get("lat", ["32.0"])[0])
+            lon = float(params.get("lon", ["34.8"])[0])
+            radius = int(float(params.get("radius", ["150"])[0]))
+            address = (params.get("address", [""])[0] or "").strip()
+            if not (-90.0 <= lat <= 90.0) or not (-180.0 <= lon <= 180.0):
+                raise ValueError("coordinates out of range")
+        except (TypeError, ValueError, OverflowError, IndexError) as e:
+            self._send_property_json(400,
+                {"ok": False, "error": "bad lat/lon/radius: %s" % e,
+                 "deals": [], "parcels": []})
+            return
+        radius = max(25, min(radius, _GOVMAP_MAX_RADIUS_M))
+        if len(address) > 120:
+            address = address[:120]
+        try:
+            payload = _govmap_property_at(lat, lon, radius, address or None)
+        except Exception as e:
+            # An upstream problem is a 502 with an explanation, never a bare
+            # 500 and never an exception that reaches the socket.
+            print("[property] lookup failed: %r" % (e,), flush=True)
+            self._send_property_json(502,
+                {"ok": False, "error": "property service unavailable",
+                 "deals": [], "parcels": []})
+            return
+        self._send_property_json(200, payload)
+
+    def _send_property_json(self, code, obj):
+        try:
+            body = json.dumps(obj, ensure_ascii=False).encode("utf-8")
+            self.send_response(code)
+            self.send_header("Content-Type",
+                             "application/json; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self._cors_headers()
+            self.end_headers()
+            self.wfile.write(body)
+        except Exception:
+            pass
+
+    def _handle_webcams(self, parsed):
+        # WorldView CAMERAS layer: GET /webcams?lat=<f>&lon=<f>&radius=<int km>
+        # Same shape of problem as /flights (a geographic query that needs a
+        # server-side credential), so it mirrors that route: validate before
+        # building any URL, forward with the secret, CORS on every path.
+        try:
+            params = urllib.parse.parse_qs(parsed.query)
+            lat = params.get("lat", ["32.0"])[0]
+            lon = params.get("lon", ["34.8"])[0]
+            radius = params.get("radius", ["100"])[0]
+            # validate as numbers BEFORE building any URL
+            lat = float(lat); lon = float(lon); radius = int(float(radius))
+        except (TypeError, ValueError, OverflowError) as e:
+            # junk coordinates get a 400 here, not a trip upstream to Windy
+            try:
+                body = ('{"error":' + json.dumps("bad lat/lon/radius: %s" % e)
+                        + ',"webcams":[]}').encode("utf-8")
+                self.send_response(400)
+                self.send_header("Content-Type", "application/json")
+                self._cors_headers()
+                self.end_headers()
+                self.wfile.write(body)
+            except Exception:
+                pass
+            return
+        radius = max(1, min(radius, _WEBCAMS_MAX_RADIUS_KM))
+        api_key = os.environ.get("WINDY_API_KEY", "") or ""
+        if not api_key:
+            # a structured, explainable empty result - NOT a 500. The page
+            # shows this message; the fix is one line in .env.
+            try:
+                body = json.dumps({"webcams": [],
+                                   "error": "no WINDY_API_KEY in .env"}
+                                  ).encode("utf-8")
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self._cors_headers()
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+            except Exception:
+                pass
+            return
+        try:
+            url = ("%s?nearby=%s,%s,%s&limit=50"
+                   "&include=images,location,urls&lang=en"
+                   % (_WINDY_WEBCAMS_URL, lat, lon, radius))
+            # v3 accepts the key ONLY as this header (renamed from v2's
+            # x-windy-key) - never as a query parameter.
+            req = urllib.request.Request(url, headers={
+                "User-Agent": "JARVIS-WorldView/1.0",
+                "Accept": "application/json",
+                "x-windy-api-key": api_key,
+            })
+            with urllib.request.urlopen(req, timeout=10) as r:
+                raw = json.loads(r.read().decode("utf-8", "replace"))
+            # reshape to only what the page needs, so the frontend is not
+            # coupled to Windy's full response shape
+            cams = []
+            for w in (raw.get("webcams") or []):
+                loc = w.get("location") or {}
+                imgs = (w.get("images") or {}).get("current") or {}
+                urls = w.get("urls") or {}
+                cam_lat = loc.get("latitude")
+                cam_lon = loc.get("longitude")
+                if cam_lat is None or cam_lon is None:
+                    continue
+                cams.append({
+                    "id": w.get("webcamId"),
+                    "title": w.get("title") or "Webcam",
+                    "lat": cam_lat, "lon": cam_lon,
+                    "preview": (imgs.get("preview")
+                                or imgs.get("thumbnail") or ""),
+                    "url": urls.get("detail") or "",
+                })
+            body = json.dumps({"webcams": cams,
+                               "count": len(cams)}).encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self._cors_headers()
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+        except Exception as e:
+            try:
+                body = ('{"error":' + json.dumps(str(e))
+                        + ',"webcams":[]}').encode("utf-8")
                 self.send_response(502)
                 self.send_header("Content-Type", "application/json")
                 self._cors_headers()
@@ -2264,6 +3972,456 @@ class _FlightsProxyHandler(http.server.BaseHTTPRequestHandler):
             except Exception:
                 pass
 
+    def _json_out(self, obj, status=200):
+        # v5.16 shared helper for the calendar/briefing endpoints.
+        body = json.dumps(obj).encode("utf-8")
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json")
+        self._cors_headers()
+        self.end_headers()
+        self.wfile.write(body)
+
+    def _peer_can_edit(self):
+        # Same gate as /todo mutations: loopback or Tailscale CGNAT only.
+        _peer = self.client_address[0] if self.client_address else ""
+        if _peer in ("127.0.0.1", "::1", "localhost"):
+            return True
+        if "." in _peer:
+            try:
+                _oct = [int(x) for x in _peer.split(".")]
+                if _oct[0] == 100 and 64 <= _oct[1] <= 127:
+                    return True
+            except Exception:
+                pass
+        return False
+
+    def _handle_calendar(self, parsed):
+        # v5.16: read + add Google Calendar events for the mobile Calendar tile.
+        try:
+            params = urllib.parse.parse_qs(parsed.query)
+            if parsed.path == "/calendar_add":
+                if not self._peer_can_edit():
+                    self._json_out({"ok": False, "error": "forbidden"}, 403)
+                    return
+                summary = (params.get("summary", [""])[0] or "").strip()
+                start = (params.get("start", [""])[0] or "").strip()
+                end = (params.get("end", [""])[0] or "").strip() or None
+                if not summary or not start:
+                    self._json_out({"ok": False,
+                                    "error": "summary and start required"}, 400)
+                    return
+                msg = calendar_add(summary, start, end)
+                ok = "added" in str(msg).lower()
+                self._json_out({"ok": ok, "message": str(msg)},
+                               200 if ok else 500)
+                return
+            svc = _calendar_service()
+            if svc is None:
+                self._json_out({"connected": False, "events": []})
+                return
+            try:
+                days = min(max(int((params.get("days", ["7"])[0]) or 7), 1), 31)
+            except Exception:
+                days = 7
+            now = datetime.datetime.now(datetime.timezone.utc)
+            tmax = now + datetime.timedelta(days=days)
+            res = svc.events().list(calendarId="primary",
+                                    timeMin=now.isoformat(),
+                                    timeMax=tmax.isoformat(),
+                                    singleEvents=True, orderBy="startTime",
+                                    maxResults=40).execute()
+            events = []
+            for e in res.get("items", []):
+                st = e.get("start", {})
+                en = e.get("end", {})
+                events.append({
+                    "id": e.get("id", ""),
+                    "summary": e.get("summary", "(no title)"),
+                    "start": st.get("dateTime", st.get("date", "")),
+                    "end": en.get("dateTime", en.get("date", "")),
+                    "allday": "date" in st and "dateTime" not in st,
+                    "location": e.get("location", ""),
+                })
+            self._json_out({"connected": True, "days": days,
+                            "events": events})
+        except Exception as e:
+            try:
+                self._json_out({"connected": False, "events": [],
+                                "error": str(e)}, 500)
+            except Exception:
+                pass
+
+    def _handle_briefing(self, parsed):
+        # v5.16: text briefing for the mobile Briefing tile. Reuses
+        # daily_briefing() and caches per (part,lang) for 15 min.
+        try:
+            params = urllib.parse.parse_qs(parsed.query)
+            lang = (params.get("lang", ["he"])[0] or "he").strip().lower()
+            if lang not in ("he", "en"):
+                lang = "he"
+            part = (params.get("part", ["auto"])[0] or "auto").strip().lower()
+            if part not in ("auto", "morning", "afternoon", "evening"):
+                part = "auto"
+            fresh = (params.get("fresh", ["0"])[0] or "0") == "1"
+            rpart = _briefing_part_from_clock(datetime.datetime.now()) \
+                if part == "auto" else part
+            ck = rpart + ":" + lang
+            now = time.time()
+            hit = _briefing_http_cache.get(ck)
+            if hit and not fresh and (now - hit["ts"] < 900) and hit["text"]:
+                self._json_out({"ok": True, "part": rpart, "lang": lang,
+                                "cached": True, "age_sec": int(now - hit["ts"]),
+                                "text": hit["text"]})
+                return
+            text = daily_briefing(rpart, lang)
+            if text and not text.startswith("[Error"):
+                _briefing_http_cache[ck] = {"ts": now, "text": text}
+            self._json_out({"ok": True, "part": rpart, "lang": lang,
+                            "cached": False, "age_sec": 0, "text": text})
+        except Exception as e:
+            try:
+                self._json_out({"ok": False, "text": "",
+                                "error": str(e)}, 500)
+            except Exception:
+                pass
+
+    def _handle_briefing_audio(self, parsed):
+        # v5.16b: same briefing, rendered to mp3 with the REAL Achilles voice
+        # (ElevenLabs Alfred for English, edge-tts he-IL-Avri for Hebrew --
+        # the exact speak() pipeline). Cached per (part,lang) alongside the
+        # text cache so the phone replays instantly.
+        try:
+            params = urllib.parse.parse_qs(parsed.query)
+            lang = (params.get("lang", ["he"])[0] or "he").strip().lower()
+            if lang not in ("he", "en"):
+                lang = "he"
+            part = (params.get("part", ["auto"])[0] or "auto").strip().lower()
+            if part not in ("auto", "morning", "afternoon", "evening"):
+                part = "auto"
+            rpart = _briefing_part_from_clock(datetime.datetime.now()) \
+                if part == "auto" else part
+            ck = rpart + ":" + lang
+            now = time.time()
+
+            thit = _briefing_http_cache.get(ck)
+            if thit and (now - thit["ts"] < 900) and thit["text"]:
+                text = thit["text"]
+            else:
+                text = daily_briefing(rpart, lang)
+                if text and not text.startswith("[Error"):
+                    _briefing_http_cache[ck] = {"ts": now, "text": text}
+
+            if not text or text.startswith("[Error"):
+                self._json_out({"ok": False, "error": "briefing failed"}, 500)
+                return
+
+            ahit = _briefing_audio_cache.get(ck)
+            fn = None
+            if (ahit and (now - ahit["ts"] < 900)
+                    and os.path.exists(ahit["path"])):
+                fn = ahit["path"]
+            if fn is None:
+                fn = os.path.join(str(_LOCATION_DIR),
+                                  "briefing_%s_%s.mp3" % (rpart, lang))
+                produced = False
+                if not is_mostly_hebrew(text):
+                    produced = speak_elevenlabs(text, fn)
+                if not produced:
+                    voice = VOICE_HEBREW if is_mostly_hebrew(text) \
+                        else VOICE_ENGLISH
+                    try:
+                        asyncio.run(_speak(text, voice, fn))
+                        produced = True
+                    except Exception:
+                        try:
+                            asyncio.run(_speak(text, VOICE_ENGLISH_FALLBACK,
+                                               fn))
+                            produced = True
+                        except Exception as e2:
+                            print("[diag] briefing_audio TTS failed:",
+                                  repr(e2))
+                if not produced or not os.path.exists(fn):
+                    self._json_out({"ok": False, "error": "tts failed"}, 500)
+                    return
+                _briefing_audio_cache[ck] = {"ts": now, "path": fn}
+
+            with open(fn, "rb") as fh:
+                data = fh.read()
+            self.send_response(200)
+            self.send_header("Content-Type", "audio/mpeg")
+            self.send_header("Content-Length", str(len(data)))
+            self._cors_headers()
+            self.end_headers()
+            self.wfile.write(data)
+        except Exception as e:
+            try:
+                self._json_out({"ok": False, "error": str(e)}, 500)
+            except Exception:
+                pass
+
+    def _handle_training(self, parsed):
+        # v5.16c: weight + workout logging for the mobile Training tile.
+        # Reads/writes training_log.json in the files dir - the SAME file the
+        # daily briefing already reads (flat keys preserved), plus history
+        # arrays for the tile's chart. Mutations gated like /todo.
+        try:
+            params = urllib.parse.parse_qs(parsed.query)
+            p = Path(__file__).resolve().parent / "training_log.json"
+            today = datetime.date.today().isoformat()
+
+            def _load():
+                try:
+                    return json.loads(p.read_text(encoding="utf-8"))
+                except Exception:
+                    return {}
+
+            def _weekly(workouts):
+                cut = (datetime.date.today()
+                       - datetime.timedelta(days=6)).isoformat()
+                return sum(1 for w in workouts if (w.get("d") or "") >= cut)
+
+            if parsed.path in ("/training_weight", "/training_workout",
+                               "/training_import"):
+                if not self._peer_can_edit():
+                    self._json_out({"ok": False, "error": "forbidden"}, 403)
+                    return
+                with _training_lock:
+                    data = _load()
+                    data.setdefault("weight_target_min_kg", 68)
+                    weights = data.setdefault("weights", [])
+                    workouts = data.setdefault("workouts", [])
+                    if parsed.path == "/training_weight":
+                        try:
+                            kg = float((params.get("kg", [""])[0] or ""))
+                        except Exception:
+                            self._json_out({"ok": False,
+                                            "error": "bad kg"}, 400)
+                            return
+                        if not (30 <= kg <= 200):
+                            self._json_out({"ok": False,
+                                            "error": "kg out of range"}, 400)
+                            return
+                        weights[:] = [w for w in weights
+                                      if w.get("d") != today]
+                        weights.append({"d": today, "kg": round(kg, 1)})
+                        weights.sort(key=lambda w: w.get("d", ""))
+                        del weights[:-120]
+                        data["last_weight_kg"] = round(kg, 1)
+                        data["last_weight_date"] = today
+                    else:
+                        wtype = (params.get("type", [""])[0] or "").strip()
+                        if not wtype:
+                            self._json_out({"ok": False,
+                                            "error": "type required"}, 400)
+                            return
+                        wdate = today
+                        if parsed.path == "/training_import":
+                            d0 = (params.get("date", [""])[0] or "").strip()
+                            if re.match(r"^\d{4}-\d{2}-\d{2}$", d0):
+                                wdate = d0
+                        entry = {"d": wdate, "t": wtype[:80]}
+                        def _numf(k):
+                            try:
+                                v = float((params.get(k, [""])[0] or ""))
+                                return round(v, 1) if v > 0 else None
+                            except Exception:
+                                return None
+                        for qk, jk in (("dist_km", "km"), ("dur_min", "min"),
+                                       ("hr_avg", "hr"), ("hr_max", "hrmax"),
+                                       ("kcal", "kcal")):
+                            v = _numf(qk)
+                            if v is not None:
+                                entry[jk] = v
+                        if parsed.path == "/training_import":
+                            entry["src"] = "health"
+                            def _same(w, e):
+                                if w.get("d") != e["d"] or w.get("t") != e["t"]:
+                                    return False
+                                # Match on the first numeric field BOTH sides
+                                # actually have. Two workouts that both lack a
+                                # field (e.g. no duration) are not "the same"
+                                # just because they're both blank - only a
+                                # genuine matching value counts as a duplicate.
+                                for k in ("km", "min", "kcal", "hr"):
+                                    wv, ev = w.get(k), e.get(k)
+                                    if wv is not None and ev is not None:
+                                        return abs(wv - ev) < 0.05
+                                return False
+                            dup = any(_same(w, entry) for w in workouts)
+                            if dup:
+                                self._json_out({"ok": True, "deduped": True})
+                                return
+                        workouts.append(entry)
+                        workouts.sort(key=lambda w: w.get("d", ""))
+                        del workouts[:-120]
+                        data["last_workout_type"] = wtype[:80]
+                        data["last_workout_date"] = wdate
+                    data["weekly_workouts"] = _weekly(workouts)
+                    p.write_text(json.dumps(data, ensure_ascii=False,
+                                            indent=2), encoding="utf-8")
+            with _training_lock:
+                data = _load()
+            self._json_out({
+                "ok": True,
+                "target": data.get("weight_target_min_kg", 68),
+                "last_weight_kg": data.get("last_weight_kg"),
+                "last_weight_date": data.get("last_weight_date"),
+                "last_workout_type": data.get("last_workout_type"),
+                "last_workout_date": data.get("last_workout_date"),
+                "weekly_workouts": data.get("weekly_workouts", 0),
+                "weights": (data.get("weights") or [])[-60:],
+                "workouts": (data.get("workouts") or [])[-14:],
+            })
+        except Exception as e:
+            try:
+                self._json_out({"ok": False, "error": str(e)}, 500)
+            except Exception:
+                pass
+
+    def _handle_training_photo(self):
+        # v5.16f: upload a workout photo directly from the mobile Training
+        # tile. Same Claude-vision extraction pipeline as the Telegram
+        # path (v5.16e) - shares _extract_workout_from_image() and
+        # _training_log_add_workout_from_extract().
+        if not self._peer_can_edit():
+            self._json_out({"ok": False, "error": "forbidden"}, 403)
+            return
+        try:
+            length = int(self.headers.get("Content-Length", "0") or "0")
+        except (TypeError, ValueError):
+            length = 0
+        if length <= 0 or length > 15000000:
+            self._json_out({"ok": False, "error": "bad content length"}, 400)
+            return
+        try:
+            raw = self.rfile.read(length)
+            payload = json.loads(raw.decode("utf-8"))
+            b64 = payload.get("image_b64", "")
+            mime = payload.get("mime") or "image/jpeg"
+            caption = (payload.get("caption") or "").strip()
+            if not b64:
+                self._json_out({"ok": False, "error": "no image"}, 400)
+                return
+            image_bytes = base64.b64decode(b64)
+        except Exception as e:
+            self._json_out({"ok": False,
+                            "error": "bad request: " + str(e)}, 400)
+            return
+        when = (payload.get("date") or "").strip() or None
+        if when:
+            # v5.16q: optional backdate for forgotten uploads. Strict
+            # ISO YYYY-MM-DD, never in the future, at most a year back.
+            try:
+                _d = datetime.date.fromisoformat(when)
+                _t = datetime.date.today()
+                if _d > _t or (_t - _d).days > 365:
+                    raise ValueError("date out of range")
+                when = _d.isoformat()
+            except Exception:
+                self._json_out({"ok": False, "error":
+                                "bad date - use YYYY-MM-DD, not in the "
+                                "future, at most a year back"}, 400)
+                return
+        extracted = _extract_workout_from_image(image_bytes, mime, caption)
+        if not extracted:
+            self._json_out({"ok": False, "error": "unreadable"})
+            return
+        if extracted.get("screen") == "day_summary":
+            # v5.16r: daily-summary screens carry totals, not
+            # workouts - logging them created fake "Walking"
+            # entries. The page shows guidance for this code.
+            self._json_out({"ok": False, "error": "day_summary"})
+            return
+        wlist = extracted.get("workouts") or []
+        if not wlist:
+            self._json_out({"ok": False, "error": "unreadable"})
+            return
+        entries = []
+        for w in wlist:
+            e = _training_log_add_workout_from_extract(w, src="upload",
+                                                       when=when)
+            if e:
+                entries.append(e)
+        if not entries:
+            self._json_out({"ok": False, "error": "write failed"}, 500)
+            return
+        self._json_out({"ok": True, "entry": entries[0],
+                        "entries": entries})
+
+    def _handle_warwatch_headlines(self, parsed):
+        # v36: unfurl up to 3 already-known source URLs for one WARWATCH
+        # cluster into real titles, shown inside the WorldView intel card -
+        # never opens an external site itself, so the "reading" experience
+        # stays inside the app; a plain link is still offered for the full
+        # original article if the person wants it.
+        try:
+            params = urllib.parse.parse_qs(parsed.query)
+            raw = params.get("urls", [""])[0]
+            urls = [u for u in raw.split(",") if u.strip()][:3]
+            results = _warwatch_headlines_for(urls)
+            self._json_out({"ok": True, "results": results})
+        except Exception as e:
+            self._json_out({"ok": False, "error": str(e)}, 500)
+
+    def _handle_geoloc_photo(self):
+        # v5.16k: photo geolocation guess for the WorldView SCOUTING
+        # tab. Same request shape and gating as /training_photo (JSON:
+        # image_b64 + mime + optional caption), but routes to
+        # _geoguess_photo() - the Claude-vision location guesser also
+        # used by the Telegram photo-caption path.
+        if not self._peer_can_edit():
+            self._json_out({"ok": False, "error": "forbidden"}, 403)
+            return
+        try:
+            length = int(self.headers.get("Content-Length", "0") or "0")
+        except (TypeError, ValueError):
+            length = 0
+        if length <= 0 or length > 15000000:
+            self._json_out({"ok": False, "error": "bad content length"}, 400)
+            return
+        try:
+            raw = self.rfile.read(length)
+            payload = json.loads(raw.decode("utf-8"))
+            b64 = payload.get("image_b64", "")
+            mime = payload.get("mime") or "image/jpeg"
+            caption = (payload.get("caption") or "").strip()
+            if not b64:
+                self._json_out({"ok": False, "error": "no image"}, 400)
+                return
+            image_bytes = base64.b64decode(b64)
+        except Exception as e:
+            self._json_out({"ok": False,
+                            "error": "bad request: " + str(e)}, 400)
+            return
+        compare = bool(payload.get("compare"))
+        if compare:
+            # v5.16n: run BOTH paths - the local trained model and the
+            # Claude-vision guess - and return them side by side. Local
+            # service down/unreachable just means "osv5m": null here,
+            # exactly like the normal path's silent fallback.
+            local_g = _osv5m_local_guess(image_bytes)
+            claude_g = _geoguess_photo(image_bytes, mime, caption,
+                                       use_local=False)
+            fused_g = None
+            if local_g is not None:
+                fused_g = _geoloc_fusion_guess(image_bytes, mime,
+                                               caption, local_g,
+                                               blind=claude_g)
+            primary = fused_g or local_g or claude_g
+            if not primary:
+                self._json_out({"ok": False, "error": "unreadable"})
+                return
+            self._json_out({"ok": True, "guess": primary,
+                            "compare": {"osv5m": local_g,
+                                        "claude": claude_g,
+                                        "fusion": fused_g}})
+            return
+        guess = _geoguess_photo(image_bytes, mime, caption)
+        if not guess:
+            self._json_out({"ok": False, "error": "unreadable"})
+            return
+        self._json_out({"ok": True, "guess": guess})
+
     def _handle_todo(self, parsed):
         # v4.53: minimal task store shared by voice and the Achilles screen.
         try:
@@ -2272,7 +4430,16 @@ class _FlightsProxyHandler(http.server.BaseHTTPRequestHandler):
             # a cross-site GET can't add/toggle/delete the user's tasks.
             if parsed.path != "/todo":
                 _peer = self.client_address[0] if self.client_address else ""
-                if _peer not in ("127.0.0.1", "::1", "localhost"):
+                _ok = _peer in ("127.0.0.1", "::1", "localhost")
+                if not _ok and "." in _peer:
+                    try:
+                        _oct = [int(x) for x in _peer.split(".")]
+                        # Tailscale CGNAT 100.64.0.0/10 -> only the user's own devices
+                        if _oct[0] == 100 and 64 <= _oct[1] <= 127:
+                            _ok = True
+                    except Exception:
+                        pass
+                if not _ok:
                     self.send_response(403)
                     self._cors_headers()
                     self.end_headers()
@@ -2351,7 +4518,7 @@ class _FlightsProxyHandler(http.server.BaseHTTPRequestHandler):
                 r = None
                 for _ in range(4):
                     r = client.messages.create(
-                        model="claude-sonnet-4-6", max_tokens=450,
+                        model="claude-sonnet-5", max_tokens=450,
                         system=sys_p, messages=msgs, tools=tools)
                     msgs.append({"role": "assistant", "content": r.content})
                     if getattr(r, "stop_reason", None) == "tool_use":
@@ -2412,6 +4579,986 @@ def _start_flights_proxy(port=7778):
         return True
 
 
+# ===========================================================================
+# SECURE TEMPORARY LIVE LOCATION SHARING (v4.68)
+# ---------------------------------------------------------------------------
+# A completely SEPARATE, minimal HTTP server (default 127.0.0.1:7779) whose
+# handler defines ONLY the sharing/upload routes. There is deliberately NO
+# code path from a share token to /keys, /flights, /vessels, /state or any
+# other internal API - isolation is enforced by architecture, not by
+# filtering. This is the ONLY server that gets exposed publicly through
+# Tailscale Funnel (which proxies to 127.0.0.1, so a loopback bind keeps
+# even the LAN out); :7777 (WorldView) and :7778 (flights/vessels/keys)
+# stay private on the Tailnet.
+#
+#   GET  /share/<token>              -> share_location.html   (410 if expired)
+#   GET  /api/share/<token>/location -> {lat, lon, updated_at} (410 if expired)
+#   GET  /u/<owner_key>              -> share_upload.html      (owner only)
+#   POST /api/location/update        -> store live fix (owner key required)
+#
+# The recipient can ONLY read live coordinates while the token is valid.
+# ===========================================================================
+_LOCATION_DIR = Path(__file__).resolve().parent
+_LOCATION_STATE_FILE = str(_LOCATION_DIR / "location_state.json")
+_SHARE_TOKENS_FILE = str(_LOCATION_DIR / "share_tokens.json")
+_OWNER_KEY_FILE = str(_LOCATION_DIR / "location_owner_key.txt")
+try:
+    _LOCATION_SHARE_PORT = int(os.environ.get("LOCATION_SHARE_PORT", "7779"))
+except Exception:
+    _LOCATION_SHARE_PORT = 7779
+# Loopback by default: Tailscale Funnel/serve proxies to 127.0.0.1, so the
+# public HTTPS path still works while plain-LAN clients can't even connect.
+_LOCATION_SHARE_BIND = (os.environ.get("LOCATION_SHARE_BIND") or "127.0.0.1").strip()
+
+# Most recent live fix. Persisted to location_state.json so a restart keeps
+# the last position until the phone pushes a fresh one.
+_live_location = {"lat": None, "lon": None, "accuracy": None, "updated_at": None}
+# token -> {"created_at": float, "expires_at": float}. Persisted so an active
+# share survives a JARVIS restart.
+_share_tokens = {}
+_location_lock = threading.Lock()
+
+_location_share_started = False
+_location_share_lock = threading.Lock()
+_location_funnel_started = False
+_location_funnel_https = None  # 443 or 8443 once the funnel is configured
+_owner_key_cache = None
+
+# --- basic per-client rate limiting for the ONE public server --------------
+# Fixed window per client: plenty for legit use (the viewer polls every 5s,
+# the phone posts every ~3-5s) yet stops hammering/brute-force scripts.
+# Behind Tailscale Funnel every connection arrives from the local tailscaled,
+# so the real client is taken from X-Forwarded-For (set by the funnel proxy).
+# Trusting that header is safe here BECAUSE the server binds loopback: anyone
+# able to forge it is already local, i.e. the owner.
+_RATE_WINDOW = 10.0   # seconds
+_RATE_MAX = 120       # requests per client per window
+_rate_lock = threading.Lock()
+_rate_buckets = {}    # client -> [window_start, count]
+
+
+def _rate_limited(handler):
+    """True if this request should be rejected with 429."""
+    fwd = handler.headers.get("X-Forwarded-For", "") or ""
+    client = (fwd.split(",")[0].strip() or
+              (handler.client_address[0] if handler.client_address else "?"))
+    now = time.time()
+    with _rate_lock:
+        # keep the table bounded even under address-spoofing floods
+        if len(_rate_buckets) > 4096:
+            for k in [k for k, v in _rate_buckets.items()
+                      if now - v[0] > _RATE_WINDOW]:
+                _rate_buckets.pop(k, None)
+        b = _rate_buckets.get(client)
+        if b is None or now - b[0] > _RATE_WINDOW:
+            _rate_buckets[client] = [now, 1]
+            return False
+        b[1] += 1
+        return b[1] > _RATE_MAX
+
+# Simple "This link has expired" page, served with HTTP 410 Gone.
+_EXPIRED_SHARE_HTML = (
+    "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\">"
+    "<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">"
+    "<title>Link expired</title><style>"
+    "html,body{height:100%;margin:0}"
+    "body{display:flex;align-items:center;justify-content:center;"
+    "font-family:-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;"
+    "background:#0b0f14;color:#e6edf3}"
+    ".card{max-width:340px;padding:32px;text-align:center}"
+    ".card h1{font-size:22px;margin:0 0 10px}"
+    ".card p{color:#8b98a5;line-height:1.5;margin:0}"
+    ".dot{font-size:44px;margin-bottom:8px}"
+    "</style></head><body><div class=\"card\">"
+    "<div class=\"dot\">\U0001F512</div>"
+    "<h1>This link has expired</h1>"
+    "<p>The live location share you are trying to open is no longer active.</p>"
+    "</div></body></html>"
+).encode("utf-8")
+
+
+def _write_private(path, text):
+    """Write text to path with owner-only (0600) permissions, so the owner key
+    / active tokens are not readable by other local users on a shared host."""
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(text)
+    except Exception:
+        try:
+            os.close(fd)
+        except OSError:
+            pass
+        raise
+    # Tighten even if the file pre-existed with looser bits.
+    try:
+        os.chmod(path, 0o600)
+    except OSError:
+        pass
+
+
+def _location_owner_key():
+    """The secret that gates the uploader page and POST /api/location/update.
+    Order: LOCATION_OWNER_KEY from .env, else a generated key persisted to
+    location_owner_key.txt (gitignored). Cached after first resolution.
+    To ROTATE a leaked key: delete location_owner_key.txt (or change the env
+    var) and restart JARVIS - a fresh key is minted and the old uploader
+    links stop working."""
+    global _owner_key_cache
+    if _owner_key_cache:
+        return _owner_key_cache
+    k = (os.environ.get("LOCATION_OWNER_KEY") or "").strip()
+    if not k:
+        try:
+            if os.path.exists(_OWNER_KEY_FILE):
+                with open(_OWNER_KEY_FILE, "r", encoding="utf-8") as f:
+                    k = (f.read() or "").strip()
+        except Exception:
+            k = ""
+    if not k:
+        k = secrets.token_urlsafe(24)
+        try:
+            _write_private(_OWNER_KEY_FILE, k)
+        except Exception:
+            pass
+    _owner_key_cache = k
+    return k
+
+
+def _persist_location_state():
+    try:
+        _write_private(_LOCATION_STATE_FILE, json.dumps(_live_location))
+    except Exception:
+        pass
+
+
+def _persist_share_tokens():
+    try:
+        _write_private(_SHARE_TOKENS_FILE, json.dumps(_share_tokens))
+    except Exception:
+        pass
+
+
+def _load_location_persisted():
+    """Load last fix + still-valid tokens from disk. Called once at startup."""
+    global _share_tokens
+    try:
+        if os.path.exists(_LOCATION_STATE_FILE):
+            with open(_LOCATION_STATE_FILE, "r", encoding="utf-8") as f:
+                d = json.load(f)
+            if isinstance(d, dict):
+                for key in ("lat", "lon", "accuracy", "updated_at"):
+                    if key in d:
+                        _live_location[key] = d[key]
+    except Exception:
+        pass
+    try:
+        if os.path.exists(_SHARE_TOKENS_FILE):
+            with open(_SHARE_TOKENS_FILE, "r", encoding="utf-8") as f:
+                d = json.load(f)
+            if isinstance(d, dict):
+                now = time.time()
+                _share_tokens = {
+                    t: r for t, r in d.items()
+                    if isinstance(r, dict) and float(r.get("expires_at", 0)) > now
+                }
+    except Exception:
+        pass
+
+
+def _create_share_token(minutes, kind="owner", extra=None):
+    """Mint a cryptographically-secure token valid for `minutes` minutes.
+    kind: "owner" (classic share of MY location), "join" (someone else
+    broadcasts THEIR location to me), "view" (my viewer for a join).
+    extra: dict merged into the record (e.g. {"join": <join_token>})."""
+    now = time.time()
+    tok = secrets.token_urlsafe(24)
+    rec = {"created_at": now, "expires_at": now + minutes * 60.0,
+           "kind": kind}
+    if extra:
+        rec.update(extra)
+    with _location_lock:
+        _share_tokens[tok] = rec
+        # opportunistic prune of anything already expired
+        for t in [t for t, r in _share_tokens.items()
+                  if float(r.get("expires_at", 0)) <= now]:
+            _share_tokens.pop(t, None)
+        _persist_share_tokens()
+    return tok
+
+
+def _ct_equal(a, b):
+    """Constant-time string equality (hmac.compare_digest over utf-8 bytes).
+    Never raises on odd input - unequal instead."""
+    try:
+        return hmac.compare_digest(str(a).encode("utf-8"),
+                                    str(b).encode("utf-8"))
+    except Exception:
+        return False
+
+
+def _check_share_token(tok):
+    """Return the token record if present AND unexpired, else None.
+    Constant-time: the presented value is compared against EVERY stored token
+    with hmac.compare_digest - no dict lookup, no early exit - so response
+    timing cannot narrow a guess. Every expired token seen during the scan is
+    pruned (memory + disk) so it can never be revived."""
+    if not tok or not isinstance(tok, str):
+        return None
+    now = time.time()
+    with _location_lock:
+        match = None
+        expired = []
+        for t, r in _share_tokens.items():
+            if float(r.get("expires_at", 0)) <= now:
+                expired.append(t)
+            elif _ct_equal(tok, t):
+                match = t
+        if expired:
+            for t in expired:
+                _share_tokens.pop(t, None)
+            _persist_share_tokens()
+        if match is None:
+            return None
+        return dict(_share_tokens[match])
+
+
+def _share_token_key(tok):
+    """Like _check_share_token but returns the REAL stored key (or None),
+    so the caller can update the record under _location_lock. Same
+    constant-time full-table scan; same opportunistic pruning."""
+    if not tok or not isinstance(tok, str):
+        return None
+    now = time.time()
+    with _location_lock:
+        match = None
+        expired = []
+        for t, r in _share_tokens.items():
+            if float(r.get("expires_at", 0)) <= now:
+                expired.append(t)
+            elif _ct_equal(tok, t):
+                match = t
+        if expired:
+            for t in expired:
+                _share_tokens.pop(t, None)
+            _persist_share_tokens()
+        return match
+
+
+class _LocationShareHandler(http.server.BaseHTTPRequestHandler):
+    """The ONLY public surface. Defines exactly the sharing/upload routes and
+    nothing else, so a share token can never reach an internal endpoint."""
+
+    server_version = "share/1.0"
+    sys_version = ""  # never advertise the Python version on the public port
+
+    def version_string(self):
+        # Base class returns "server_version sys_version"; pin it so the public
+        # Server header discloses neither the Python version nor a stray space.
+        return "share/1.0"
+
+    # This is the one PUBLICLY reachable server, so slow/partial requests must
+    # not pin worker threads forever (slowloris). BaseHTTPRequestHandler
+    # applies this as the per-connection socket timeout.
+    timeout = 20
+
+    # Both HTML pages are served BY this server, so every fetch they make is
+    # same-origin: no CORS headers are needed, and none are sent - a foreign
+    # web page gets nothing readable out of these endpoints.
+    # Per-page Content-Security-Policy (belt over the SRI suspenders): even a
+    # compromised CDN script could not exfiltrate the token/coordinates to an
+    # attacker host, because connect-src/img-src only allow the tile servers.
+    _CSP_VIEWER = ("default-src 'none'; base-uri 'none'; form-action 'none'; "
+                   "frame-ancestors 'none'; "
+                   "script-src 'unsafe-inline' https://unpkg.com; "
+                   "style-src 'unsafe-inline' https://unpkg.com; "
+                   "img-src data: blob: https://*.tile.openstreetmap.org "
+                   "https://server.arcgisonline.com; "
+                   "connect-src 'self' https://*.tile.openstreetmap.org "
+                   "https://server.arcgisonline.com; "
+                   "worker-src blob:; child-src blob:")
+    _CSP_UPLOADER = ("default-src 'none'; base-uri 'none'; form-action 'none'; "
+                     "frame-ancestors 'none'; "
+                     "script-src 'unsafe-inline'; style-src 'unsafe-inline'; "
+                     "connect-src 'self'")
+    _CSP_PLAIN = ("default-src 'none'; base-uri 'none'; form-action 'none'; "
+                  "frame-ancestors 'none'; style-src 'unsafe-inline'")
+
+    def _sec_headers(self, csp=None):
+        self.send_header("Cache-Control", "no-store")
+        # Lock the page down: no sniffing, no framing, no referrer leakage
+        # of the token to tile servers / CDNs / navigation targets.
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.send_header("X-Frame-Options", "DENY")
+        self.send_header("Referrer-Policy", "no-referrer")
+        self.send_header("Content-Security-Policy", csp or self._CSP_PLAIN)
+
+    def _send(self, code, body=b"", ctype="text/plain; charset=utf-8",
+              csp=None):
+        try:
+            self.send_response(code)
+            self.send_header("Content-Type", ctype)
+            self._sec_headers(csp)
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            if body:
+                self.wfile.write(body)
+        except Exception:
+            pass
+
+    def _serve_static(self, filename, csp):
+        # Fixed filenames only - never a path derived from the request, so
+        # directory traversal is impossible.
+        try:
+            body = (_LOCATION_DIR / filename).read_bytes()
+        except Exception:
+            self._send(500, b"error")
+            return
+        self._send(200, body, "text/html; charset=utf-8", csp=csp)
+
+    def do_OPTIONS(self):
+        try:
+            self.send_response(204)
+            self.send_header("Allow", "GET, POST, OPTIONS")
+            self._sec_headers()
+            self.end_headers()
+        except Exception:
+            pass
+
+    def do_GET(self):
+        if _rate_limited(self):
+            self._send(429, b"Too many requests")
+            return
+        try:
+            path = urllib.parse.urlparse(self.path).path
+        except Exception:
+            self._send(400, b"bad request")
+            return
+
+        # --- public share page ---------------------------------------------
+        if path.startswith("/share/"):
+            tok = path[len("/share/"):].strip("/")
+            if _check_share_token(tok):
+                self._serve_static("share_location.html", self._CSP_VIEWER)
+            else:
+                self._send(410, _EXPIRED_SHARE_HTML, "text/html; charset=utf-8")
+            return
+
+        # --- public live-location API (lat/lon/updated_at ONLY) ------------
+        if path.startswith("/api/share/") and path.endswith("/location"):
+            tok = path[len("/api/share/"):-len("/location")].strip("/")
+            rec = _check_share_token(tok)
+            if rec:
+                if rec.get("kind") == "view":
+                    # v4.95 reverse request: the viewer follows the fix
+                    # uploaded by whoever opened the matching join link.
+                    with _location_lock:
+                        jrec = _share_tokens.get(rec.get("join") or "")
+                        fix = (jrec or {}).get("fix") or {}
+                        lat = fix.get("lat")
+                        lon = fix.get("lon")
+                        ua = fix.get("updated_at")
+                    if jrec is None or float(jrec.get("expires_at", 0)) <= time.time():
+                        self._send(410, b'{"error":"expired"}', "application/json")
+                        return
+                else:
+                    with _location_lock:
+                        lat = _live_location.get("lat")
+                        lon = _live_location.get("lon")
+                        ua = _live_location.get("updated_at")
+                # A share exposes ONLY fixes from its own lifetime (plus a
+                # short backward slack for "already broadcasting, then
+                # shared"). A position persisted before this share existed -
+                # e.g. yesterday's, restored from disk at startup - is never
+                # revealed to a new recipient; the viewer shows "waiting for
+                # a location fix" until a live one arrives.
+                try:
+                    fresh_since = float(rec.get("created_at", 0)) - 120.0
+                except (TypeError, ValueError):
+                    fresh_since = time.time()
+                if ua is None or float(ua) < fresh_since:
+                    lat = lon = ua = None
+                payload = json.dumps({
+                    "lat": lat, "lon": lon, "updated_at": ua,
+                }).encode("utf-8")
+                self._send(200, payload, "application/json")
+            else:
+                self._send(410, b'{"error":"expired"}', "application/json")
+            return
+
+        # --- owner-only uploader page (my phone) ---------------------------
+        if path.startswith("/u/"):
+            key = path[len("/u/"):].strip("/")
+            if key and _ct_equal(key, _location_owner_key()):
+                self._serve_static("share_upload.html", self._CSP_UPLOADER)
+            else:
+                self._send(404, b"Not found")
+            return
+
+        # --- reverse request: join page (the OTHER person's phone) ---------
+        if path.startswith("/r/"):
+            tok = path[len("/r/"):].strip("/")
+            rec = _check_share_token(tok)
+            if rec and rec.get("kind") == "join":
+                self._serve_static("request_join.html", self._CSP_UPLOADER)
+            else:
+                self._send(410, _EXPIRED_SHARE_HTML, "text/html; charset=utf-8")
+            return
+
+        # --- reverse request: page metadata (expiry + optional owner link) --
+        if path.startswith("/api/req/") and path.endswith("/meta"):
+            tok = path[len("/api/req/"):-len("/meta")].strip("/")
+            rec = _check_share_token(tok)
+            if rec and rec.get("kind") == "join":
+                payload = json.dumps({
+                    "ok": True,
+                    "expires_in": max(0, int(float(rec.get("expires_at", 0)) - time.time())),
+                    "owner_url": rec.get("owner_url") or None,
+                }).encode("utf-8")
+                self._send(200, payload, "application/json")
+            else:
+                self._send(410, b'{"error":"expired"}', "application/json")
+            return
+
+        # Everything else is invisible. No /keys, no /flights, no /vessels.
+        self._send(404, b"Not found")
+
+    def do_POST(self):
+        if _rate_limited(self):
+            self._send(429, b"Too many requests")
+            return
+        try:
+            path = urllib.parse.urlparse(self.path).path
+        except Exception:
+            self._send(400, b"bad request")
+            return
+        # --- reverse request: fix upload from whoever holds the join link ---
+        if path.startswith("/api/req/") and path.endswith("/update"):
+            tok = path[len("/api/req/"):-len("/update")].strip("/")
+            key = _share_token_key(tok)
+            valid = False
+            if key is not None:
+                with _location_lock:
+                    valid = (_share_tokens.get(key, {}).get("kind") == "join")
+            if not valid:
+                self._send(410, b'{"error":"expired"}', "application/json")
+                return
+            try:
+                length = int(self.headers.get("Content-Length", "0") or "0")
+            except (TypeError, ValueError):
+                length = 0
+            if length > 10000:
+                self._send(413, b'{"error":"too large"}', "application/json")
+                return
+            length = max(0, length)
+            try:
+                raw = self.rfile.read(length) if length else b""
+                data = json.loads(raw.decode("utf-8")) if raw else {}
+                lat = float(data["lat"])
+                lon = float(data["lon"])
+                if not (-90.0 <= lat <= 90.0 and -180.0 <= lon <= 180.0):
+                    raise ValueError("coordinates out of range")
+                acc = data.get("accuracy")
+                try:
+                    acc = float(acc) if acc is not None else None
+                except (TypeError, ValueError):
+                    acc = None
+                with _location_lock:
+                    if key in _share_tokens:
+                        _share_tokens[key]["fix"] = {
+                            "lat": lat, "lon": lon, "accuracy": acc,
+                            "updated_at": time.time(),
+                        }
+                # in-memory only, on purpose: a restart ends the session
+                # rather than reviving someone's old position from disk.
+                self._send(200, b'{"ok":true}', "application/json")
+            except Exception:
+                self._send(400, b'{"ok":false}', "application/json")
+            return
+
+        if path != "/api/location/update":
+            self._send(404, b"Not found")
+            return
+        # Owner key required - a share-token holder can NOT push fake fixes.
+        key = self.headers.get("X-Owner-Key", "") or ""
+        if not (key and _ct_equal(key, _location_owner_key())):
+            self._send(403, b'{"error":"forbidden"}', "application/json")
+            return
+        try:
+            length = int(self.headers.get("Content-Length", "0") or "0")
+        except (TypeError, ValueError):
+            length = 0
+        if length > 10000:
+            self._send(413, b'{"error":"too large"}', "application/json")
+            return
+        length = max(0, length)
+        try:
+            raw = self.rfile.read(length) if length else b""
+            data = json.loads(raw.decode("utf-8")) if raw else {}
+            lat = float(data["lat"])
+            lon = float(data["lon"])
+            if not (-90.0 <= lat <= 90.0 and -180.0 <= lon <= 180.0):
+                raise ValueError("coordinates out of range")
+            acc = data.get("accuracy")
+            try:
+                acc = float(acc) if acc is not None else None
+            except (TypeError, ValueError):
+                acc = None
+            with _location_lock:
+                _live_location["lat"] = lat
+                _live_location["lon"] = lon
+                _live_location["accuracy"] = acc
+                _live_location["updated_at"] = time.time()
+                _persist_location_state()
+            self._send(200, b'{"ok":true}', "application/json")
+        except Exception:
+            self._send(400, b'{"ok":false}', "application/json")
+
+    # silence per-request access logs
+    def log_message(self, *args, **kwargs):
+        pass
+
+
+class _LocationShareServer(http.server.ThreadingHTTPServer):
+    """ThreadingHTTPServer, minus the slow part. http.server.HTTPServer.
+    server_bind() calls socket.getfqdn(host) to set self.server_name - a
+    reverse-DNS lookup that can take minutes on machines where a VPN/
+    MagicDNS setup (e.g. Tailscale) interferes with DNS resolution. This
+    server binds to loopback only and never needs a real FQDN, so we call
+    the grandparent (plain socketserver.TCPServer) bind instead and set
+    server_name/server_port directly from the socket address (instant).
+    v4.90: root cause of the multi-minute hang on share_live_location -
+    WorldView's server never hit this because it runs as a separate
+    subprocess (python -m http.server), not in-process on the voice thread.
+    """
+    def server_bind(self):
+        socketserver.TCPServer.server_bind(self)
+        self.server_name = self.server_address[0]
+        self.server_port = self.server_address[1]
+
+
+def _start_location_share_server(port=None):
+    """Start the isolated location-share server on a daemon thread. Idempotent.
+    Returns True if it is (now) listening, False if the bind failed."""
+    global _location_share_started
+    if port is None:
+        port = _LOCATION_SHARE_PORT
+    with _location_share_lock:
+        if _location_share_started:
+            return True
+        _load_location_persisted()
+        owner_key = _location_owner_key()
+        _loc_log("_start_location_share_server: binding %s:%d" %
+                 (_LOCATION_SHARE_BIND, port))
+        try:
+            server = _LocationShareServer(
+                (_LOCATION_SHARE_BIND, port), _LocationShareHandler
+            )
+            _loc_log("_start_location_share_server: bind OK")
+        except OSError as e:
+            print("[diag] location share server could not bind to %s:%d: %r"
+                  % (_LOCATION_SHARE_BIND, port, e))
+            return False
+        threading.Thread(
+            target=server.serve_forever, daemon=True,
+            name="jarvis-location-share",
+        ).start()
+        _location_share_started = True
+        print("[diag] location share server listening on %s:%d"
+              % (_LOCATION_SHARE_BIND, port))
+        # Never print the full owner key: stdout can end up in captured logs.
+        # The full uploader URL reaches the owner over the paired Telegram
+        # chat (share_live_location) and lives in location_owner_key.txt.
+        print("[diag] location uploader ready at /u/%s... (key redacted; "
+              "full link arrives via Telegram)" % owner_key[:6])
+        return True
+
+
+def _funnel_base_url():
+    """Best-effort public HTTPS base URL for the share links. Order:
+    LOCATION_FUNNEL_DOMAIN / FUNNEL_DOMAIN in .env, else the MagicDNS name
+    from `tailscale status --json`. Returns None if it cannot be determined."""
+    d = (os.environ.get("LOCATION_FUNNEL_DOMAIN")
+         or os.environ.get("FUNNEL_DOMAIN") or "").strip()
+    if d:
+        d = d.rstrip("/")
+        if not d.startswith("http"):
+            d = "https://" + d
+        return d
+    try:
+        _loc_log("_funnel_base_url: calling tailscale status --json")
+        out = subprocess.run(
+            ["tailscale", "status", "--json"],
+            capture_output=True, text=True, timeout=6,
+            creationflags=0x08000000,  # v4.88: CREATE_NO_WINDOW - this
+            # process has no console (pythonw); spawning a console-mode
+            # child without this flag is a known Windows stall/flash risk.
+        )
+        _loc_log("_funnel_base_url: tailscale status returned rc=%s" % out.returncode)
+        if out.returncode == 0 and out.stdout:
+            j = json.loads(out.stdout)
+            dns = ((j.get("Self") or {}).get("DNSName") or "").strip().rstrip(".")
+            if dns:
+                base = "https://" + dns
+                if _location_funnel_https and _location_funnel_https != 443:
+                    base += ":%d" % _location_funnel_https
+                return base
+    except Exception as _e:
+        _loc_log("_funnel_base_url: tailscale status FAILED: %r" % (_e,))
+    return None
+
+
+def _funnel_serve_conflict(https_port, target_port):
+    """Return a description string if HTTPS :https_port on this node already
+    serves something OTHER than our target_port, else None.
+    Guards the documented Windows bug where `tailscale funnel <port>` silently
+    OVERWRITES an existing `tailscale serve` route on the same HTTPS port
+    (breaking private routes and producing 502 circular proxies). We inspect
+    `tailscale serve status --json` first and refuse to clobber."""
+    try:
+        _loc_log("_funnel_serve_conflict: calling tailscale serve status --json")
+        out = subprocess.run(["tailscale", "serve", "status", "--json"],
+                             capture_output=True, text=True, timeout=10,
+                             creationflags=0x08000000)  # v4.88: CREATE_NO_WINDOW
+        _loc_log("_funnel_serve_conflict: returned rc=%s" % out.returncode)
+        if out.returncode != 0 or not (out.stdout or "").strip():
+            return None  # no config to clobber (fresh node) or can't inspect
+        st = json.loads(out.stdout)
+    except Exception as _e:
+        _loc_log("_funnel_serve_conflict: FAILED: %r" % (_e,))
+        return None
+    suffix = ":%d" % https_port
+    ours = ":%d" % target_port
+    for hostport, site in (st.get("Web") or {}).items():
+        if not str(hostport).endswith(suffix):
+            continue
+        for hpath, h in ((site or {}).get("Handlers") or {}).items():
+            proxy = str((h or {}).get("Proxy") or "")
+            if proxy and not proxy.rstrip("/").endswith(ours):
+                return "%s already proxies %r -> %r" % (hostport, hpath, proxy)
+    return None
+
+
+def _ensure_location_funnel(port=None):
+    """Best-effort: ask Tailscale to Funnel ONLY the share port publicly.
+    Tries HTTPS :443 first, falls back to :8443 if :443 is already serving
+    another route (never overwrites - see _funnel_serve_conflict). WorldView
+    on :7777 and the proxy on :7778 are never funneled. Non-fatal if the
+    tailscale CLI is missing - run `tailscale funnel <port>` manually, or set
+    LOCATION_FUNNEL_DOMAIN in .env."""
+    global _location_funnel_started, _location_funnel_https
+    if port is None:
+        port = _LOCATION_SHARE_PORT
+    if _location_funnel_started:
+        return
+    _location_funnel_started = True
+    try:
+        for https_port in (443, 8443):
+            conflict = _funnel_serve_conflict(https_port, port)
+            if conflict:
+                print("[diag] tailscale funnel: not touching :%d (%s)"
+                      % (https_port, conflict))
+                continue
+            cmd = ["tailscale", "funnel", "--bg"]
+            if https_port != 443:
+                cmd.append("--https=%d" % https_port)
+            cmd.append(str(port))
+            _loc_log("_ensure_location_funnel: calling %r" % (cmd,))
+            res = subprocess.run(cmd, capture_output=True, text=True,
+                                 timeout=20,
+                                 creationflags=0x08000000)  # v4.88: CREATE_NO_WINDOW
+            _loc_log("_ensure_location_funnel: returned rc=%s" % res.returncode)
+            if res.returncode == 0:
+                _location_funnel_https = https_port
+                print("[diag] tailscale funnel active: https :%d -> "
+                      "127.0.0.1:%d (share routes only; :7777/:7778 stay "
+                      "private)" % (https_port, port))
+                return
+            print("[diag] tailscale funnel on :%d failed: %s"
+                  % (https_port,
+                     ((res.stderr or res.stdout or "").strip())[:200]))
+        print("[diag] tailscale funnel NOT configured (no free HTTPS port). "
+              "Run `tailscale funnel --https=8443 %d` manually or set "
+              "LOCATION_FUNNEL_DOMAIN in .env." % port)
+    except Exception as e:
+        print("[diag] tailscale funnel not started (%r); set "
+              "LOCATION_FUNNEL_DOMAIN in .env or run `tailscale funnel %d`"
+              % (e, port))
+
+
+def _ensure_location_sharing():
+    """Bring up the share server + public Funnel exposure. Idempotent."""
+    ok = _start_location_share_server()
+    _ensure_location_funnel()
+    return ok
+
+
+def _share_live_location_impl(minutes=15):
+    """Voice tool: mint a secure temporary link to the user's LIVE location and
+    send it to the user's brother over Telegram. Exposes ONLY live coordinates
+    while the token is valid; everything else stays private."""
+    _loc_log("share_live_location CALLED minutes=%r" % (minutes,))
+    try:
+        minutes = int(round(float(minutes)))
+    except Exception:
+        minutes = 15
+    minutes = max(1, min(minutes, 24 * 60))  # clamp 1 min .. 24 h
+
+    _ensure_location_sharing()
+    tok = _create_share_token(minutes)
+    base = _funnel_base_url()
+    owner_key = _location_owner_key()
+    if base:
+        share_url = "%s/share/%s" % (base, tok)
+        upload_url = "%s/u/%s" % (base, owner_key)
+    else:
+        share_url = "http://localhost:%d/share/%s" % (_LOCATION_SHARE_PORT, tok)
+        upload_url = "http://localhost:%d/u/%s" % (_LOCATION_SHARE_PORT, owner_key)
+
+    with _location_lock:
+        last = _live_location.get("updated_at")
+    has_fresh_fix = bool(last) and (time.time() - float(last)) < 120
+    _loc_log("share_live_location token minted, share_url=%s has_fresh_fix=%s" %
+             (share_url, has_fresh_fix))
+
+    # 3) send the public share URL to the brother via Telegram.
+    brother = (os.environ.get("BROTHER_TELEGRAM_CHAT_ID") or "").strip()
+    sent_to_brother = False
+    if brother:
+        sent_to_brother = telegram_send(
+            "\U0001F4CD Live location — expires in %d min:\n%s"
+            % (minutes, share_url),
+            chat_id=brother,
+        )
+
+    # Nudge the owner's paired chat: the uploader link (so the phone starts
+    # broadcasting) and/or the share link to forward if no brother is set.
+    owner_lines = []
+    if not sent_to_brother:
+        owner_lines.append("Forward to your brother (%d min): %s"
+                           % (minutes, share_url))
+    if not has_fresh_fix:
+        owner_lines.append("Open this on your phone to start broadcasting your "
+                           "location:\n" + upload_url)
+    if owner_lines:
+        telegram_send("\n\n".join(owner_lines))
+
+    # Spoken confirmation for the brain to phrase naturally.
+    if not base:
+        return ("I generated a %d-minute share link, sir, but no public Funnel "
+                "domain is configured. Set LOCATION_FUNNEL_DOMAIN in the .env, "
+                "or enable Tailscale Funnel on port %d. The link is %s"
+                % (minutes, _LOCATION_SHARE_PORT, share_url))
+    if sent_to_brother:
+        tail = ("" if has_fresh_fix else " I've also sent you the uploader link "
+                "— open it on your phone to start broadcasting.")
+        return ("Done, sir. Your brother now has a live location link that "
+                "expires in %d minutes.%s" % (minutes, tail))
+    return ("I created a %d-minute link and sent it to you to forward, sir. "
+            "Set BROTHER_TELEGRAM_CHAT_ID in the .env and I'll send it to your "
+            "brother automatically next time." % minutes)
+
+
+def share_live_location(minutes=15):
+    """Wrapper: run the real implementation, and on ANY failure write the
+    full traceback to location_diag.log and return an explicit failure
+    message - so the model reports the truth instead of assuming success.
+    (v4.93: added after the model confirmed 'link sent' 2 seconds after a
+    call that had actually died silently.)"""
+    try:
+        return _share_live_location_impl(minutes)
+    except Exception:
+        import traceback
+        _loc_log("share_live_location EXCEPTION:\n" + traceback.format_exc())
+        return ("The location-share tool FAILED with an internal error, sir. "
+                "No link was created and nothing was sent. The exact error was "
+                "recorded in location_diag.log. Report this failure honestly - "
+                "do not claim the location was shared.")
+
+
+def _request_location_impl(minutes=15, show_me=False):
+    """Reverse share: mint a JOIN link (send to the person you want to
+    locate; their browser asks for consent and broadcasts) plus a VIEW
+    link (the existing map page) for the owner. If show_me is True, the
+    join page also offers a live link to the owner's location."""
+    _loc_log("request_location CALLED minutes=%r show_me=%r" % (minutes, show_me))
+    try:
+        minutes = int(round(float(minutes)))
+    except Exception:
+        minutes = 15
+    minutes = max(1, min(minutes, 24 * 60))
+
+    _ensure_location_sharing()
+    base = _funnel_base_url()
+
+    extra = {}
+    owner_view_url = None
+    if show_me:
+        # A standard owner-share token, embedded in the join page, so the
+        # other person can see the owner too. Only minted when asked.
+        otok = _create_share_token(minutes, kind="owner")
+        owner_view_url = ("%s/share/%s" % (base, otok)) if base else (
+            "http://localhost:%d/share/%s" % (_LOCATION_SHARE_PORT, otok))
+        extra["owner_url"] = owner_view_url
+
+    jtok = _create_share_token(minutes, kind="join", extra=extra)
+    vtok = _create_share_token(minutes, kind="view", extra={"join": jtok})
+
+    if base:
+        join_url = "%s/r/%s" % (base, jtok)
+        view_url = "%s/share/%s" % (base, vtok)
+    else:
+        join_url = "http://localhost:%d/r/%s" % (_LOCATION_SHARE_PORT, jtok)
+        view_url = "http://localhost:%d/share/%s" % (_LOCATION_SHARE_PORT, vtok)
+    _loc_log("request_location minted join=%s view=%s show_me=%s" %
+             (join_url, view_url, show_me))
+
+    lines = ["Send this to the person you want to locate (%d min):\n%s"
+             % (minutes, join_url),
+             "Your live map of them:\n%s" % view_url]
+    if show_me:
+        lines.append("Note: the page they open also lets them see YOUR "
+                     "location (you asked to share it back). Open your "
+                     "uploader link if you aren't broadcasting yet.")
+    telegram_send("\n\n".join(lines))
+
+    if not base:
+        return ("I created the request links, sir, but no public Funnel "
+                "domain is active, so they only work on your own network. "
+                "Enable Tailscale Funnel on port %d for public access."
+                % _LOCATION_SHARE_PORT)
+    back = (" They will also be able to see your location, as requested."
+            if show_me else
+            " Your own location stays hidden from them.")
+    return ("Done, sir. I sent you two links on Telegram: forward the "
+            "first to whoever you want to locate - when they open it and "
+            "approve, their live position appears on your map link for "
+            "%d minutes.%s" % (minutes, back))
+
+
+def request_location(minutes=15, show_me=False):
+    """Honest-failure wrapper - same contract as share_live_location."""
+    try:
+        return _request_location_impl(minutes, show_me)
+    except Exception:
+        import traceback
+        _loc_log("request_location EXCEPTION:\n" + traceback.format_exc())
+        return ("The location-request tool FAILED with an internal error, "
+                "sir. No links were created. The exact error was recorded "
+                "in location_diag.log. Report this failure honestly - do "
+                "not claim any link was sent.")
+
+
+_geoloc_baseline_proc = None
+
+
+def _ensure_geoloc_baseline():
+    """v5.16o: start the local trained geolocation model service
+    (geoloc_baseline/geoloc_baseline_server.py, port 8850, localhost
+    only) in the background if it is installed and not already
+    running - same windowless pattern as the WorldView server below.
+    Silent no-op when not installed; port check prevents a double
+    spawn when the manual START window is already open; any failure
+    here never affects ACHILLES (the caller of the model,
+    _osv5m_local_guess, falls back to Claude vision on its own).
+    Output goes to geoloc_baseline/geoloc_baseline.log."""
+    global _geoloc_baseline_proc
+    try:
+        if _wv_port_in_use(8850):
+            return True
+        base = Path(__file__).resolve().parent / "geoloc_baseline"
+        venv_py = base / "venv" / "Scripts" / "python.exe"
+        server = base / "geoloc_baseline_server.py"
+        if not venv_py.exists() or not server.exists():
+            return False
+        creationflags = 0x08000000 if os.name == "nt" else 0
+        log = open(base / "geoloc_baseline.log", "ab")
+        _geoloc_baseline_proc = subprocess.Popen(
+            [str(venv_py), str(server)],
+            cwd=str(base),
+            stdout=log,
+            stderr=log,
+            creationflags=creationflags,
+            close_fds=True,
+        )
+        return True
+    except Exception as e:
+        print("[diag] failed to spawn geoloc baseline service:", repr(e))
+        return False
+
+
+# --- v5.23 guarded static server -------------------------------------------
+# The page server used to be a bare "python -m http.server" over the whole
+# project folder. Directory listing was on, so anything on the tailnet could
+# browse to / and download .env, credentials.json, every backup and the
+# source itself. The pages are public by design; the folder they live in is
+# not, and those two were never separated.
+#
+# This serves the same folder through an allowlist instead: only the file
+# types a page actually needs, no directory listings, no dotfiles, and no
+# path traversal. An allowlist is used rather than a blocklist so that a new
+# secret dropped into the folder tomorrow is refused by default.
+_STATIC_SERVER_SRC = '''
+import os, sys, posixpath, urllib.parse, http.server, socketserver
+
+ROOT = os.path.abspath(sys.argv[2])
+PORT = int(sys.argv[1])
+ALLOWED_EXT = {".html", ".htm", ".css", ".js", ".mjs", ".map",
+               ".png", ".jpg", ".jpeg", ".gif", ".svg", ".webp", ".ico",
+               ".woff", ".woff2", ".ttf", ".mp3", ".webmanifest"}
+# .json is NOT allowed wholesale - credentials.json and anthropic_usage.json
+# both end in .json. Only files a page genuinely fetches are named here.
+ALLOWED_NAMES = {"countries.geo.json", "manifest.json", "site.webmanifest"}
+
+class Guarded(http.server.SimpleHTTPRequestHandler):
+    def __init__(self, *a, **kw):
+        super().__init__(*a, directory=ROOT, **kw)
+
+    def _permitted(self, path):
+        rel = urllib.parse.urlparse(path).path
+        rel = urllib.parse.unquote(rel)
+        if rel.endswith("/"):
+            return False          # no directory listings, ever
+        name = posixpath.basename(rel)
+        if not name or name.startswith("."):
+            return False          # .env and friends
+        if ".." in rel.split("/"):
+            return False          # traversal
+        if name in ALLOWED_NAMES:
+            return True
+        return os.path.splitext(name)[1].lower() in ALLOWED_EXT
+
+    def send_head(self):
+        if not self._permitted(self.path):
+            self.send_error(404, "Not found")
+            return None
+        return super().send_head()
+
+    def list_directory(self, path):
+        self.send_error(404, "Not found")
+        return None
+
+    def log_message(self, *a):
+        pass
+
+class Threaded(socketserver.ThreadingTCPServer):
+    allow_reuse_address = True
+    daemon_threads = True
+
+Threaded(("0.0.0.0", PORT), Guarded).serve_forever()
+'''
+
+def _write_static_server(files_dir):
+    """Drop the guarded server next to the pages and return its path."""
+    p = Path(files_dir) / "_static_server.py"
+    try:
+        p.write_text(_STATIC_SERVER_SRC, encoding="utf-8")
+        return str(p)
+    except Exception as e:
+        print("[diag] could not write the guarded static server:", repr(e))
+        return None
+
+
 def _ensure_worldview_server(files_dir, port=7777):
     """Ensure a local HTTP server is serving WorldView at 127.0.0.1:port.
     Starts python -m http.server in the background if nothing is listening yet.
@@ -2419,6 +5566,8 @@ def _ensure_worldview_server(files_dir, port=7777):
     global _worldview_server_proc
     _start_flights_proxy()
     _start_vessels_relay()
+    _start_warwatch_relay()
+    _ensure_geoloc_baseline()
     if _wv_port_in_use(port):
         return True
     try:
@@ -2426,8 +5575,12 @@ def _ensure_worldview_server(files_dir, port=7777):
         if os.name == "nt":
             # CREATE_NO_WINDOW - no console flash on Windows
             creationflags = 0x08000000
+        guard = _write_static_server(files_dir)
+        cmd = ([sys.executable, guard, str(port), str(files_dir)] if guard
+               else [sys.executable, "-m", "http.server", str(port),
+                     "--bind", "0.0.0.0"])
         _worldview_server_proc = subprocess.Popen(
-            [sys.executable, "-m", "http.server", str(port), "--bind", "0.0.0.0"],
+            cmd,
             cwd=str(files_dir),
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
@@ -2489,6 +5642,43 @@ def open_worldview():
         return "Opening WorldView, sir."
     except Exception as e:
         return "Failed to open WorldView: %s" % e
+
+def open_hermes():
+    """Open HERMES, the financial/investment terminal (hermes.html, formerly
+    aleph.html), in Edge --app mode over the same local :7777 server that
+    serves WorldView. Mirrors open_worldview: ensures the server is up, then
+    points Edge at the terminal URL. Falls back to the default browser, and
+    to the legacy aleph.html filename if hermes.html isn't deployed yet.
+    Returns a short status string for the brain to phrase naturally."""
+    files_dir = Path(__file__).resolve().parent
+    path = files_dir / "hermes.html"
+    served_name = "hermes.html"
+    if not path.exists():
+        legacy = files_dir / "aleph.html"
+        if legacy.exists():
+            path, served_name = legacy, "aleph.html"
+        else:
+            return "HERMES terminal file not found, sir. Expected at: %s" % path
+    if not _ensure_worldview_server(files_dir, port=7777):
+        return "Failed to start the local server, sir. Try restarting JARVIS."
+    url = "http://localhost:7777/" + served_name + "?t=" + str(int(time.time()))
+    edge_candidates = [
+        r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe",
+        r"C:\Program Files\Microsoft\Edge\Application\msedge.exe",
+    ]
+    for exe in edge_candidates:
+        if os.path.exists(exe):
+            try:
+                subprocess.Popen([exe, "--app=" + url], close_fds=True)
+                return "Opening HERMES, sir."
+            except Exception as e:
+                print("[diag] Edge --app launch failed, falling back to default browser:", repr(e))
+                break
+    try:
+        webbrowser.open(url)
+        return "Opening HERMES, sir."
+    except Exception as e:
+        return "Failed to open HERMES: %s" % e
 
 def open_roadmap():
     """Open Mission Control - the project roadmap/status dashboard - in Edge
@@ -2552,6 +5742,23 @@ def todo_add_voice(text, lang="he"):
     if lang == "he":
         return "נוסף: %s. %d משימות פתוחות, אדוני." % (text, n)
     return "Added: %s. %d open tasks, sir." % (text, n)
+
+def _open_screen_reply(result, he):
+    """v5.19: the open_* helpers answer in English. When the command was
+    spoken in Hebrew, hand back a Hebrew confirmation - but ONLY for the
+    exact known success strings. Anything else is passed through word for
+    word, so a real failure is never masked by a cheerful translation."""
+    if not he:
+        return result
+    return {
+        "Opening HERMES, sir.":
+            "\u05e4\u05d5\u05ea\u05d7 \u05d0\u05ea \u05d4\u05e8\u05de\u05e1, \u05d0\u05d3\u05d5\u05e0\u05d9.",
+        "Opening WorldView, sir.":
+            "\u05e4\u05d5\u05ea\u05d7 \u05d0\u05ea \u05d5\u05d5\u05e8\u05dc\u05d3\u05d5\u05d5\u05d9\u05d5, \u05d0\u05d3\u05d5\u05e0\u05d9.",
+        "Opening Mission Control, sir.":
+            "\u05e4\u05d5\u05ea\u05d7 \u05d0\u05ea \u05de\u05e4\u05ea \u05d4\u05d3\u05e8\u05db\u05d9\u05dd, \u05d0\u05d3\u05d5\u05e0\u05d9.",
+    }.get((result or "").strip(), result)
+
 
 def open_portal():
     """v4.61: double-click on the floating hole -> FULLSCREEN portal.
@@ -3427,6 +6634,61 @@ LOCAL_TOOLS = [
         "input_schema": {"type": "object", "properties": {}},
     },
     {
+        "name": "open_hermes",
+        "description": ("Open HERMES, the financial/investment terminal in the "
+                        "user's browser. Use when the user asks to open HERMES, "
+                        "open the investment/trading terminal, the markets "
+                        "terminal, or the finance dashboard. Hebrew triggers "
+                        "include '\u05e4\u05ea\u05d7 \u05d0\u05ea \u05d4\u05e8\u05de\u05e1', "
+                        "'\u05ea\u05e4\u05ea\u05d7 \u05d0\u05ea \u05d4\u05e8\u05de\u05e1', "
+                        "'\u05e4\u05ea\u05d7 \u05d0\u05ea \u05d4\u05d8\u05e8\u05de\u05d9\u05e0\u05dc', "
+                        "'\u05de\u05de\u05e9\u05e7 \u05d4\u05d4\u05e9\u05e7\u05e2\u05d4'."),
+        "input_schema": {"type": "object", "properties": {}},
+    },
+    {
+        "name": "share_live_location",
+        "description": ("Create a SECURE, TEMPORARY public link to the user's "
+                        "LIVE location and send it to the user's brother over "
+                        "Telegram. Use when the user asks to share/send their "
+                        "live location or 'where I am' for some minutes, e.g. "
+                        "'share my location for 15 minutes', 'send my brother my "
+                        "live location for half an hour'. Hebrew triggers include "
+                        "'שתף את המיקום "
+                        "שלי', 'תשלח לאח "
+                        "שלי את המיקום', "
+                        "'שתף מיקום ל-15 "
+                        "דקות'. The link expires automatically "
+                        "and reveals ONLY the live coordinates - no other app "
+                        "data. Pass minutes as the requested duration; default 15."),
+        "input_schema": {"type": "object", "properties": {
+            "minutes": {"type": "number",
+                        "description": "How many minutes the link stays valid. Default 15."}
+        }},
+    },
+    {
+        "name": "request_location",
+        "description": ("Create a SECURE, TEMPORARY link that asks SOMEONE "
+                        "ELSE for their live location. The user forwards the "
+                        "join link; when that person opens it and approves, "
+                        "their position appears on the user's live map link. "
+                        "Consent-based: the browser asks them explicitly. Use "
+                        "when the user asks WHERE SOMEONE ELSE is / to request "
+                        "someone's location. Optionally also reveals the "
+                        "user's own location back to that person."),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "minutes": {"type": "number",
+                            "description": "Link lifetime in minutes (default 15)"},
+                "show_my_location": {"type": "boolean",
+                                     "description": "If true, the person can also "
+                                                    "see the user's live location "
+                                                    "(default false)"}
+            },
+            "required": []
+        }
+    },
+    {
         "name": "open_achilles",
         "description": ("Open the Achilles Core screen - an ultra-realistic "
                         "WebGL black hole that serves as the assistant's "
@@ -3445,10 +6707,55 @@ LOCAL_TOOLS = [
                       "description": "core = black hole, solar = solar system, todo = task list"}
         }},
     },
+    {
+        "name": "set_weight_target",
+        "description": ("Change the user's minimum-weight red line (the training "
+                        "goal used by the daily briefing and the Training tile). "
+                        "Use ONLY when the user explicitly asks to change, update, "
+                        "or set their weight target/goal - e.g. \"change my weight "
+                        "target to 72\", \"tishane et matrat ha'mishkal sheli le 72\". "
+                        "Do not use this for logging today's actual measured weight - "
+                        "that is a separate action the user does from the Training tile."),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "kg": {"type": "number",
+                       "description": "The new minimum-weight target in kg."}
+            },
+            "required": ["kg"],
+        },
+    },
 ]
+
+def set_weight_target(kg):
+    """LLM tool handler: change weight_target_min_kg in training_log.json.
+    Mirrors the file path and locking used by the /training_weight HTTP
+    handler in _handle_training so both stay consistent. v5.16j: this tool
+    did not exist before, so asking JARVIS to change the weight target was
+    silently a no-op - it could only reply conversationally with no way to
+    actually write the change."""
+    try:
+        kg = float(kg)
+    except Exception:
+        return "That doesn't look like a valid weight."
+    if not (30 <= kg <= 200):
+        return "That weight is out of a sane range (30-200 kg) - please confirm the number."
+    p = Path(__file__).resolve().parent / "training_log.json"
+    with _training_lock:
+        try:
+            data = json.loads(p.read_text(encoding="utf-8"))
+        except Exception:
+            data = {}
+        old = data.get("weight_target_min_kg", 68)
+        data["weight_target_min_kg"] = round(kg, 1)
+        p.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+    _record_action("set_weight_target", {"old": old, "new": round(kg, 1)})
+    return "Weight target updated from %g kg to %g kg." % (float(old), kg)
 
 def run_local_tool(name, tool_input):
     """Dispatch a tool call from Claude to the matching Python function."""
+    if name == "set_weight_target":
+        return set_weight_target(tool_input.get("kg"))
     if name == "open_app":
         return open_app(tool_input.get("name", ""))
     if name == "save_note":
@@ -3512,6 +6819,13 @@ def run_local_tool(name, tool_input):
         )
     if name == "open_worldview":
         return open_worldview()
+    if name == "open_hermes":
+        return open_hermes()
+    if name == "share_live_location":
+        return share_live_location(tool_input.get("minutes", 15))
+    if name == "request_location":
+        return request_location(tool_input.get("minutes", 15),
+                                bool(tool_input.get("show_my_location", False)))
     if name == "open_achilles":
         return open_achilles(tool_input.get("scene", "core"))
     if name == "open_roadmap":
@@ -3653,7 +6967,7 @@ def whats_new(lang="en"):
             "details. Plain text only - no markdown, no bullet points."
         )
         r = client.messages.create(
-            model="claude-sonnet-4-6", max_tokens=300,
+            model="claude-sonnet-5", max_tokens=300,
             system=sys_p,
             messages=[{"role": "user", "content": facts}])
         parts = [b.text for b in r.content
@@ -3818,7 +7132,7 @@ def system_health(lang="en"):
             "no bullet points."
         )
         r = client.messages.create(
-            model="claude-sonnet-4-6", max_tokens=300,
+            model="claude-sonnet-5", max_tokens=300,
             system=sys_p,
             messages=[{"role": "user", "content": raw}])
         parts = [b.text for b in r.content
@@ -3932,7 +7246,7 @@ def learned_this_week(lang="en"):
                 "markdown, no bullet points."
             )
             r = client.messages.create(
-                model="claude-sonnet-4-6", max_tokens=350,
+                model="claude-sonnet-5", max_tokens=350,
                 system=sys_p,
                 messages=[{"role": "user", "content": facts}])
             parts = [b.text for b in r.content
@@ -4304,7 +7618,7 @@ except Exception as _patch_err:
 # =====================================================================
 BACKUP_DIR = Path("./backups")
 BACKUP_KEEP = 14
-VAULT_DIR = Path("./Obsidian_Vault")
+VAULT_DIR = _VAULT_ROOT  # v5.20: absolute, see the note at SSD_OBSIDIAN_VAULT
 
 
 def backup_vault():
@@ -4408,7 +7722,7 @@ def _backup_intercept(msg):
 # =====================================================================
 # Decisions log (v4.32)
 # =====================================================================
-DECISIONS_FILE = Path("./Obsidian_Vault/Decisions.md")
+DECISIONS_FILE = _VAULT_ROOT / "Decisions.md"  # v5.20: absolute
 
 
 def log_decision(text):
@@ -4528,7 +7842,9 @@ def _decision_review_intercept(msg):
 # =====================================================================
 # Nutrition / macro tracker (v4.33) - reuses training_log.json
 # =====================================================================
-TRAINING_LOG_FILE = Path("./training_log.json")
+# v5.20: absolute for the same reason as the vault - a training log written
+# to the wrong folder would read as an empty history, not as an error.
+TRAINING_LOG_FILE = _FILES_DIR / "training_log.json"
 
 
 def _load_training_log():
@@ -4541,12 +7857,26 @@ def _load_training_log():
 
 
 def _save_training_log(data):
+    """v5.20: write to a temp file, then rename over the real one.
+
+    write_text truncates the target FIRST and then writes. A crash, a kill,
+    or a power cut in that gap left training_log.json half-written - and
+    that one file holds every weight, workout, injury and nutrition entry.
+    os.replace is atomic on NTFS, so the file on disk is only ever the old
+    complete version or the new complete version, never a torn one."""
+    tmp = TRAINING_LOG_FILE.parent / (TRAINING_LOG_FILE.name + ".tmp")
     try:
-        TRAINING_LOG_FILE.write_text(
+        tmp.write_text(
             json.dumps(data, indent=2, ensure_ascii=False),
             encoding="utf-8")
+        os.replace(tmp, TRAINING_LOG_FILE)
     except Exception as e:
         print("[diag] training log save failed:", repr(e))
+        try:
+            if tmp.exists():
+                tmp.unlink()
+        except Exception:
+            pass
 
 
 def _nutrition_reset_if_new_day(data):
@@ -4746,7 +8076,7 @@ def start_quiz(topic, lang="en"):
             "answer>\nWrite in "
             + ("Hebrew" if lang == "he" else "English") + ".")
         r = client.messages.create(
-            model="claude-sonnet-4-6", max_tokens=400,
+            model="claude-sonnet-5", max_tokens=400,
             system=sys_p,
             messages=[{"role": "user", "content": content}])
         txt = " ".join(b.text for b in r.content
@@ -4809,7 +8139,7 @@ def evaluate_quiz_answer(user_answer, lang="en"):
         prompt = ("Question: %s\nModel answer: %s\nStudent's answer: %s"
                   % (q, expected, ans))
         r = client.messages.create(
-            model="claude-sonnet-4-6", max_tokens=300,
+            model="claude-sonnet-5", max_tokens=300,
             system=sys_p,
             messages=[{"role": "user", "content": prompt}])
         fb = " ".join(b.text for b in r.content
@@ -5736,6 +9066,55 @@ def weight_check(lang="en"):
     return "Latest weight: %g kg%s. Red line %g - %s%s" % (w, relpart, wmin, verdict, trend)
 
 
+def _weight_target_set_parse(msg):
+    """Parse an explicit CHANGE-the-weight-target command -> float kg,
+    else None. v5.16s: deterministic bypass of the model for this
+    action - past chat logs (injected as long-term memory) contain
+    the model's own earlier false "already updated to 72" replies,
+    which made it answer from memory instead of calling the tool.
+    Requires a change-verb so plain weight LOGGING ("\u05e9\u05e7\u05dc\u05ea\u05d9 71",
+    "log weight 70.5") never lands here."""
+    if not msg or not isinstance(msg, str):
+        return None
+    text = msg.strip()
+    text = re.sub(r"^\s*(hey\s+|hi\s+|ok\s+|okay\s+)?jarvis[\s,:]*",
+                  "", text, flags=re.I)
+    num = r"(\d{2,3}(?:\.\d{1,2})?)"
+    en = (r"(?:change|set|update|make)\b[^.!?]{0,40}?"
+          r"(?:weight\s*target|target\s*weight|weight\s*goal|"
+          r"red\s*line|weight)\b[^0-9]{0,12}" + num)
+    he = (r"(?:\u05e9\u05e0\u05d4|\u05ea\u05e9\u05e0\u05d4|\u05e2\u05d3\u05db\u05df|\u05ea\u05e2\u05d3\u05db\u05df|"
+          r"\u05d4\u05d2\u05d3\u05e8|\u05ea\u05d2\u05d3\u05d9\u05e8|\u05e9\u05d9\u05dd|\u05ea\u05e9\u05d9\u05dd)"
+          r"[^.!?]{0,40}?"
+          r"(?:\u05d9\u05e2\u05d3\s*\u05d4?\u05de\u05e9\u05e7\u05dc|"
+          r"\u05de\u05d8\u05e8\u05ea\s*\u05d4?\u05de\u05e9\u05e7\u05dc|"
+          r"\u05de\u05e9\u05e7\u05dc\s*\u05d4?\u05d9\u05e2\u05d3|"
+          r"\u05d4?\u05e7\u05d5\s*\u05d4?\u05d0\u05d3\u05d5\u05dd|"
+          r"\u05d4?\u05de\u05e9\u05e7\u05dc)"
+          r"[^0-9]{0,12}" + num)
+    for pat in (en, he):
+        m = re.search(pat, text, re.I)
+        if m:
+            try:
+                v = float(m.group(1))
+            except Exception:
+                continue
+            if 30.0 <= v <= 200.0:
+                return v
+    return None
+
+
+def _weight_target_set_reply(kg, lang="en"):
+    """Run the real tool handler and word the confirmation in the
+    user's language. The tool writes the file and records the undo
+    action; we only translate its success message."""
+    out = set_weight_target(kg)
+    if lang == "he" and out.startswith("Weight target updated"):
+        return ("\u05d9\u05e2\u05d3 \u05d4\u05de\u05e9\u05e7\u05dc \u05e2\u05d5\u05d3\u05db\u05df "
+                "\u05dc-%g \u05e7\"\u05d2, \u05d0\u05d3\u05d5\u05e0\u05d9." % float(kg))
+    return out
+
+
 def _weight_check_intercept(msg):
     if not msg or not isinstance(msg, str):
         return False
@@ -5933,7 +9312,7 @@ def search_obsidian(query, lang="en"):
             + ". Base the answer ONLY on the excerpts; if they are thin, say "
             "what little was found. Plain text, no markdown, no URLs.")
         r = client.messages.create(
-            model="claude-sonnet-4-6", max_tokens=400,
+            model="claude-sonnet-5", max_tokens=400,
             system=sys_p,
             messages=[{"role": "user", "content": facts}])
         parts = [b.text for b in r.content if getattr(b, "type", None) == "text"]
@@ -6028,7 +9407,7 @@ def _news_briefing_section(lang="en"):
         r = None
         for _ in range(4):
             r = client.messages.create(
-                model="claude-sonnet-4-6", max_tokens=500,
+                model="claude-sonnet-5", max_tokens=500,
                 system=sys_p, messages=msgs, tools=tools)
             msgs.append({"role": "assistant", "content": r.content})
             if getattr(r, "stop_reason", None) == "tool_use":
@@ -6045,6 +9424,181 @@ def _news_briefing_section(lang="en"):
             pass
         return ""
 
+
+# --- v5.16w: two-tier brain routing ------------------------------
+# Simple turns run on Sonnet 5 (fast, cheap). Turns that look like
+# real reasoning work - analysis, planning, code, comparisons, long
+# or multi-part questions - escalate to Fable 5. The decision is
+# deterministic keyword/shape matching, never an extra API call, so
+# routing costs nothing and always behaves the same way.
+BRAIN_LIGHT = "claude-sonnet-5"
+# v5.18: the research brain is Opus 5, not Fable 5. Opus 5 is the newer
+# model - its knowledge runs to May 2026 against Fable's January - it is
+# rated "moderate" latency where Fable is "slower", and it costs half as
+# much per token. Fable stays the stronger model overall, but for a VOICE
+# assistant the latency column decides it: every extra second here is
+# silence the user sits through before hearing anything.
+BRAIN_HEAVY = "claude-opus-5"
+# Max is deliberate: this path only fires when a real research question
+# was asked, so the depth is the whole point of escalating. Anthropic do
+# warn that max buys small gains for significant cost on ordinary work -
+# which is exactly why it is gated behind _pick_brain_model and never
+# touches everyday turns. Drop to "xhigh" here if it feels slow.
+BRAIN_HEAVY_EFFORT = "max"
+# Adaptive thinking spends the SAME budget as the answer. At the old 1024
+# ceiling a max-effort turn could burn the whole allowance thinking and
+# return a truncated answer or nothing at all. max_tokens is only a CAP -
+# unused headroom is never billed - so this is free insurance. Thinking
+# blocks are dropped before speaking, so it cannot lengthen the speech.
+BRAIN_HEAVY_MAX_TOKENS = 16000
+
+_BRAIN_HEAVY_HE = (
+    "\u05ea\u05d7\u05e9\u05d5\u05d1",
+    "\u05dc\u05e2\u05d5\u05de\u05e7",
+    "\u05ea\u05e0\u05ea\u05d7",
+    "\u05ea\u05db\u05e0\u05df",
+    "\u05ea\u05db\u05e0\u05d5\u05df",
+    "\u05d4\u05e9\u05d5\u05d5\u05d4",
+    "\u05d4\u05e9\u05d5\u05d5\u05d0\u05d4",
+    "\u05ea\u05e1\u05d1\u05d9\u05e8",
+    "\u05d4\u05e1\u05d1\u05e8",
+    "\u05de\u05d3\u05d5\u05e2",
+    "\u05e7\u05d5\u05d3",
+    "\u05d1\u05d0\u05d2",
+    "\u05e9\u05d2\u05d9\u05d0\u05d4",
+    "\u05e4\u05d5\u05e0\u05e7\u05e6\u05d9\u05d4",
+    "\u05d0\u05e1\u05d8\u05e8\u05d8\u05d2\u05d9\u05d4",
+    "\u05ea\u05d5\u05db\u05e0\u05d9\u05ea",
+    "\u05de\u05d7\u05e7\u05e8",
+    "\u05e0\u05de\u05e7",
+    "\u05d9\u05ea\u05e8\u05d5\u05e0\u05d5\u05ea",
+    "\u05d7\u05e1\u05e8\u05d5\u05e0\u05d5\u05ea",
+    "\u05dc\u05e0\u05ea\u05d7",
+    "\u05ea\u05db\u05ea\u05d5\u05d1",
+    "\u05e1\u05e7\u05e8\u05d9\u05e4\u05d8",
+    "\u05d0\u05dc\u05d2\u05d5\u05e8\u05d9\u05ea\u05dd",
+    "\u05ea\u05de\u05dc\u05d9\u05e5",
+    "\u05d4\u05de\u05dc\u05e6\u05d4",
+    "\u05ea\u05e9\u05d5\u05d5\u05d4",
+    "\u05dc\u05ea\u05db\u05e0\u05df",
+)
+_BRAIN_LIGHT_HE = (
+    "\u05de\u05d4 \u05d4\u05e9\u05e2\u05d4",
+    "\u05de\u05d6\u05d2 \u05d0\u05d5\u05d5\u05d9\u05e8",
+    "\u05de\u05d4 \u05e0\u05e9\u05de\u05e2",
+    "\u05ea\u05e0\u05d2\u05df",
+    "\u05ea\u05d3\u05dc\u05d9\u05e7",
+    "\u05ea\u05db\u05d1\u05d4",
+    "\u05ea\u05e2\u05e6\u05d5\u05e8",
+    "\u05d0\u05d9\u05d6\u05d4 \u05d9\u05d5\u05dd",
+    "\u05ea\u05d5\u05d3\u05d4",
+    "\u05d1\u05d5\u05e7\u05e8 \u05d8\u05d5\u05d1",
+    "\u05dc\u05d9\u05dc\u05d4 \u05d8\u05d5\u05d1",
+    "\u05de\u05d4 \u05e7\u05d5\u05e8\u05d4",
+)
+_BRAIN_HEAVY_EN = (
+    "analyz",
+    "explain why",
+    "think through",
+    "think hard",
+    "deep dive",
+    "in depth",
+    "step by step",
+    "compare",
+    "trade-off",
+    "tradeoff",
+    "code",
+    "debug",
+    "function",
+    "script",
+    "algorithm",
+    "strategy",
+    "plan ",
+    "roadmap",
+    "research",
+    "pros and cons",
+    "recommend",
+    "design a",
+    "architect",
+    "refactor",
+    "optimi",
+    "why does",
+    "how does",
+)
+_BRAIN_LIGHT_EN = (
+    "what time",
+    "weather",
+    "thanks",
+    "thank you",
+    "good morning",
+    "good night",
+    "play ",
+    "turn on",
+    "turn off",
+    "stop ",
+    "pause",
+)
+
+
+def _brain_call(client, model, sys_prompt, messages, tools):
+    """v5.18: single place that knows how to invoke the brain.
+
+    Effort travels as output_config={"effort": ...}. An older anthropic
+    SDK on this machine would reject that keyword outright, and a hard
+    failure here would leave ACHILLES mute - so an unsupported keyword
+    degrades to a plain call rather than taking the assistant down. The
+    same applies if the API itself rejects the value."""
+    kw = {"model": model, "system": sys_prompt, "messages": messages}
+    if tools is not None:
+        kw["tools"] = tools
+    if model != BRAIN_HEAVY:
+        kw["max_tokens"] = 1024
+        return client.messages.create(**kw)
+    kw["max_tokens"] = BRAIN_HEAVY_MAX_TOKENS
+    try:
+        return client.messages.create(
+            output_config={"effort": BRAIN_HEAVY_EFFORT}, **kw)
+    except TypeError as e:
+        print("[brain] SDK does not accept output_config, "
+              "running without effort:", e, flush=True)
+    except Exception as e:
+        low = str(e).lower()
+        if "output_config" not in low and "effort" not in low:
+            raise
+        print("[brain] API rejected effort, running without it:", e, flush=True)
+    return client.messages.create(**kw)
+
+
+def _pick_brain_model(user_message):
+    """Choose which model answers this turn. Conservative by design:
+    defaults to the cheap model and only escalates on a clear signal,
+    so a normal chat never quietly costs heavy-model money."""
+    try:
+        text = (user_message or "").strip()
+        low = text.lower()
+        words = len(text.split())
+        # Long turns are reasoning work no matter what words they
+        # happen to contain, so length is checked FIRST - otherwise a
+        # long question containing a casual phrase would be routed
+        # cheap purely by accident.
+        if words >= 25:
+            return BRAIN_HEAVY
+        # Short explicit light intents - commands, greetings, status.
+        if words <= 12:
+            for k in _BRAIN_LIGHT_HE + _BRAIN_LIGHT_EN:
+                if k in low:
+                    return BRAIN_LIGHT
+        # Explicit heavy intents.
+        for k in _BRAIN_HEAVY_HE + _BRAIN_HEAVY_EN:
+            if k in low:
+                return BRAIN_HEAVY
+        # Several real questions in one turn is multi-part reasoning -
+        # but only when there are actual words, not bare punctuation.
+        if low.count("?") >= 2 and words >= 6:
+            return BRAIN_HEAVY
+        return BRAIN_LIGHT
+    except Exception:
+        return BRAIN_LIGHT
 
 def think(user_message, memory, lang=""):
     if not ANTHROPIC_API_KEY:
@@ -6118,6 +9672,11 @@ def think(user_message, memory, lang=""):
         return fitness_progress(lang="he" if lang == "he" or is_hebrew(user_message) else "en")
     if _weekly_summary_intercept(user_message):
         return weekly_summary(lang="he" if lang == "he" or is_hebrew(user_message) else "en")
+    _wts = _weight_target_set_parse(user_message)
+    if _wts is not None:
+        # v5.16s: deterministic - the model (and its poisoned long-term
+        # memory) never sees an explicit target-change command.
+        return _weight_target_set_reply(_wts, lang="he" if lang == "he" or is_hebrew(user_message) else "en")
     _wt = _weight_log_parse(user_message)
     if _wt is not None:
         return log_weight(_wt, lang="he" if lang == "he" or is_hebrew(user_message) else "en")
@@ -6135,6 +9694,22 @@ def think(user_message, memory, lang=""):
         return open_achilles("core")
     if re.search(r"(פתח|תפתח|open|show|launch|תראה|תציג|תעלה)[^.!?]{0,24}(solar\s?system|מערכת השמש|הכוכבים|the planets)", _low):
         return open_achilles("solar")
+    # v5.19: HERMES / WorldView / Mission Control used to reach their tool
+    # only by asking the model to call it - an API round trip, a bill, and
+    # a second of silence to open a window that needs no thought at all.
+    # Worse, the model can decline to call a tool when its context misleads
+    # it, which is the failure this codebase already learned the hard way.
+    # An open/show verb stays required, so "what IS hermes" still reaches
+    # the model rather than popping a window. The tools remain registered:
+    # unusual phrasings still work through the model as before.
+    _he = (lang == "he") or is_hebrew(user_message)
+    _open_verb = r"(\u05e4\u05ea\u05d7|\u05ea\u05e4\u05ea\u05d7|\u05ea\u05e2\u05dc\u05d4|\u05ea\u05e6\u05d9\u05d2|\u05ea\u05e8\u05d0\u05d4|open|show|launch|bring up|pull up)"
+    if re.search(_open_verb + r"[^.!?]{0,24}(hermes|\u05d4\u05e8\u05de\u05e1|\u05d0\u05e8\u05de\u05e1|\u05d4\u05e8\u05de\u05e6|\u05d8\u05e8\u05de\u05d9\u05e0\u05dc)", _low):
+        return _open_screen_reply(open_hermes(), _he)
+    if re.search(_open_verb + r"[^.!?]{0,24}(world\s?view|\u05d5\u05d5\u05e8\u05dc\u05d3\s?\u05d5\u05d5\u05d9\u05d5|\u05d5\u05e8\u05dc\u05d3\s?\u05d5\u05d5\u05d9\u05d5|\u05d4\u05d2\u05dc\u05d5\u05d1\u05d5\u05e1|globe)", _low):
+        return _open_screen_reply(open_worldview(), _he)
+    if re.search(_open_verb + r"[^.!?]{0,24}(roadmap|road\s?map|mission\s?control|\u05de\u05e4\u05ea \u05d4\u05d3\u05e8\u05db\u05d9\u05dd|\u05e8\u05d5\u05d3\u05de\u05d0\u05e4)", _low):
+        return _open_screen_reply(open_roadmap(), _he)
     # v4.53: task list - open the todo scene / add a task by voice
     _t = re.search(r"(?:תוסיף משימה|תוסיף לרשימה|add (?:a )?task)\s+(.+)", user_message, re.IGNORECASE)
     if _t is not None:
@@ -6187,13 +9762,12 @@ def think(user_message, memory, lang=""):
             # Tool-use loop. Claude may ask to run a local tool; we run it, hand
             # the result back, and let it continue — repeating until it gives a
             # final text answer. The cap (5) prevents any accidental infinite loop.
+            _brain_model = _pick_brain_model(user_message)
+            if _brain_model != BRAIN_LIGHT:
+                print("[brain] escalating to %s" % _brain_model)
             for _ in range(5):
-                r = client.messages.create(
-                    model="claude-sonnet-4-6", max_tokens=1024,
-                    system=sys_prompt,
-                    messages=conversation_history,
-                    tools=tools,
-                )
+                r = _brain_call(client, _brain_model, sys_prompt,
+                                conversation_history, tools)
                 # Record exactly what Claude returned (text + any tool requests).
                 conversation_history.append({"role": "assistant", "content": r.content})
 
@@ -6203,6 +9777,9 @@ def think(user_message, memory, lang=""):
                     tool_results = []
                     for block in r.content:
                         if getattr(block, "type", None) == "tool_use" and block.name in (
+                                "set_weight_target",  # v5.16k fix: was missing from this
+                                # allowlist, so the tool never actually ran even though it
+                                # was offered to Claude and dispatched by name below.
                                 "open_app", "save_note", "calendar_read", "calendar_add",
                                 "calendar_delete", "calendar_update",
                                 "gmail_read", "gmail_spam_review", "gmail_move_spam",
@@ -6211,7 +9788,8 @@ def think(user_message, memory, lang=""):
                                 "spotify_previous", "spotify_volume", "spotify_now_playing",
                                 "learn_topic", "deep_learn_domain", "resume_learning",
                                 "learning_status", "open_search_panel", "open_worldview",
-                                "open_achilles", "open_roadmap"):
+                                "open_hermes",
+                                "open_achilles", "open_roadmap", "share_live_location", "request_location"):
                             out = run_local_tool(block.name, block.input or {})
                             tool_results.append({
                                 "type": "tool_result",
@@ -6242,7 +9820,7 @@ def think(user_message, memory, lang=""):
             try:
                 _normalize_history()
                 r = client.messages.create(
-                    model="claude-sonnet-4-6", max_tokens=1024,
+                    model=BRAIN_LIGHT, max_tokens=1024,
                     system=sys_prompt_plain, messages=conversation_history)
                 reply = r.content[0].text
                 conversation_history.append({"role": "assistant", "content": reply})
@@ -6477,7 +10055,7 @@ def daily_briefing(part="auto", lang="en"):
     try:
         client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
         r = client.messages.create(
-            model="claude-sonnet-4-6", max_tokens=400,
+            model="claude-sonnet-5", max_tokens=400,
             system=sys_p,
             messages=[{"role": "user", "content": facts}])
         parts = [b.text for b in r.content if getattr(b, "type", None) == "text"]
@@ -6948,6 +10526,14 @@ async def _speak(text, voice, fn="jarvis_reply.mp3"):
     # natural "butler" delivery instead of a fast, flat robotic read.
     await edge_tts.Communicate(text, voice, rate="-8%", pitch="-3Hz").save(fn)
 
+# v5.16y: play_audio blocks until MCI reports playback finished ("play ... wait"),
+# so speak() only returns once ACHILLES has actually stopped talking. Every call
+# site used to add a SECOND wait estimated from the word count, which was pure
+# dead time: the orb stayed on "speaking" and the mic stayed shut for up to 14s
+# after the audio ended. That estimate is gone; this tiny guard is all that is
+# left, to let the output device settle before the mic reopens.
+_POST_SPEAK_GUARD_S = 0.35
+
 def play_audio(path="jarvis_reply.mp3"):
     try:
         p = os.path.abspath(path)
@@ -6968,12 +10554,53 @@ def stop_audio():
     except Exception:
         pass
 
+def _tts_state(value):
+    """v5.16z: drive the orb from inside speak(), because the call sites cannot.
+    They flip the orb to "speaking" and then call speak(), but speak() spends the
+    first stretch SYNTHESISING - shipping the whole reply to edge-tts/ElevenLabs
+    and waiting for the finished mp3 to come back. During that stretch nothing is
+    audible, so "speaking" is a lie and the assistant looks hung. Best effort:
+    never let an orb update break the voice path."""
+    try:
+        if APP is not None:
+            APP.state = value
+    except Exception:
+        pass
+
+def _tts_state_get():
+    try:
+        if APP is not None:
+            return APP.state
+    except Exception:
+        pass
+    return None
+
+def _tts_log(engine, chars, synth_s, play_s):
+    """v5.16z: one line per spoken reply, so the synthesis wait is a measured
+    number instead of a guess. Absolute path - a relative one would follow the
+    working directory and land somewhere unpredictable."""
+    try:
+        p = Path(__file__).resolve().parent / "tts_timing.log"
+        stamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        with open(p, "a", encoding="utf-8") as f:
+            f.write("%s engine=%s chars=%d synth=%.2fs play=%.2fs%s"
+                    % (stamp, engine, chars, synth_s, play_s, "\n"))
+    except Exception:
+        pass
+
 def speak(text):
     # Use a UNIQUE filename each time. The old code always wrote the same
     # 'jarvis_reply.mp3'; if the previous file was still locked (another copy of
     # JARVIS, or playback not fully closed) the save failed with
     # "Permission denied: jarvis_reply.mp3". A fresh name avoids that entirely.
     fn = "jarvis_reply_%d.mp3" % (int(time.time() * 1000) % 1000000)
+    _prev_state = _tts_state_get()
+    # Synthesis is still thinking-time: no audio exists yet.
+    _tts_state("thinking")
+    _t0 = time.time()
+    _engine = "none"
+    _t_synth = 0.0
+    _t_play = 0.0
     try:
         produced = False
         # Voice selection: use the ElevenLabs Alfred voice for replies that are
@@ -6983,25 +10610,39 @@ def speak(text):
         mostly_he = is_mostly_hebrew(text)
         if not mostly_he:
             produced = speak_elevenlabs(text, fn)
+            if produced:
+                _engine = "elevenlabs"
         if not produced:
             voice = VOICE_HEBREW if mostly_he else VOICE_ENGLISH
             try:
                 asyncio.run(_speak(text, voice, fn))
                 produced = True
+                _engine = "edge"
             except Exception as e:
                 if not mostly_he:
                     try:
                         asyncio.run(_speak(text, VOICE_ENGLISH_FALLBACK, fn))
                         produced = True
+                        _engine = "edge_fallback"
                     except Exception as e2:
                         print("Voice error (fallback):", e2)
                 else:
                     print("Voice error:", e)
+        _t_synth = time.time() - _t0
         if produced:
+            # Only NOW does sound actually start.
+            _tts_state("speaking")
+            _t1 = time.time()
             play_audio(fn)
+            _t_play = time.time() - _t1
     except Exception as e:
         print("Voice error:", e)
     finally:
+        _tts_log(_engine, len(text or ""), _t_synth, _t_play)
+        # Hand the orb back exactly as it was found, so callers that never
+        # managed the state (boot greeting, F3 repeat) do not strand it.
+        if _prev_state is not None:
+            _tts_state(_prev_state)
         # Best-effort cleanup so these temp files don't pile up. play_audio
         # blocks until playback ends and closes the handle, so by here it's free.
         try:
@@ -7160,7 +10801,7 @@ def search_with_optional_image(user_text, image_path=None, lang="he"):
         msgs = [{"role": "user", "content": content}]
         for _ in range(5):
             r = client.messages.create(
-                model="claude-sonnet-4-6", max_tokens=700,
+                model="claude-sonnet-5", max_tokens=700,
                 system=sys_prompt,
                 messages=msgs, tools=tools)
             msgs.append({"role": "assistant", "content": r.content})
@@ -7276,16 +10917,41 @@ _tg_chat_id = None
 _tg_pair_code = None
 _tg_offset = 0
 
+def _loc_log(msg):
+    # v4.87: file-based diagnostics for the location-sharing voice path,
+    # same pattern as orb_diag.log - pythonw has no console, so silent
+    # failures here were previously invisible.
+    try:
+        _p = os.path.join(os.path.dirname(os.path.abspath(__file__)), "location_diag.log")
+        with open(_p, "a", encoding="utf-8") as _f:
+            _f.write("[%s] %s\n" % (datetime.datetime.now().strftime("%H:%M:%S"), msg))
+    except Exception:
+        pass
+
 def _tg_api(method, params=None, timeout=60):
     if not TELEGRAM_BOT_TOKEN:
+        _loc_log("_tg_api %s SKIPPED: no TELEGRAM_BOT_TOKEN" % method)
         return None
     url = "https://api.telegram.org/bot%s/%s" % (TELEGRAM_BOT_TOKEN, method)
     data = urllib.parse.urlencode(params).encode("utf-8") if params else None
     try:
         with urllib.request.urlopen(
                 urllib.request.Request(url, data=data), timeout=timeout) as r:
-            return json.loads(r.read().decode("utf-8"))
-    except Exception:
+            result = json.loads(r.read().decode("utf-8"))
+            _loc_log("_tg_api %s OK chat_id=%s ok=%s" %
+                     (method, (params or {}).get("chat_id"), result.get("ok")))
+            return result
+    except urllib.error.HTTPError as e:
+        try:
+            detail = e.read().decode("utf-8")[:300]
+        except Exception:
+            detail = ""
+        _loc_log("_tg_api %s FAILED chat_id=%s HTTP %s: %s" %
+                 (method, (params or {}).get("chat_id"), e.code, detail))
+        return None
+    except Exception as e:
+        _loc_log("_tg_api %s FAILED chat_id=%s: %r" %
+                 (method, (params or {}).get("chat_id"), e))
         return None
 
 def telegram_send(text, chat_id=None):
@@ -7293,10 +10959,550 @@ def telegram_send(text, chat_id=None):
     Safe no-op if Telegram is not configured / not paired."""
     cid = chat_id if chat_id is not None else _tg_chat_id
     if not TELEGRAM_BOT_TOKEN or cid is None or not text:
+        _loc_log("telegram_send SKIPPED token=%s cid=%s text_len=%s" %
+                 (bool(TELEGRAM_BOT_TOKEN), cid, len(text or "")))
         return False
     t = text if len(text) <= 4000 else (text[:3990] + "...")
     res = _tg_api("sendMessage", {"chat_id": cid, "text": t})
-    return bool(res and res.get("ok"))
+    ok = bool(res and res.get("ok"))
+    _loc_log("telegram_send cid=%s ok=%s" % (cid, ok))
+    return ok
+
+def _tg_download_photo(file_id):
+    """Download a Telegram photo by file_id. Returns (bytes, mime) or None."""
+    try:
+        r = _tg_api("getFile", {"file_id": file_id}, timeout=20)
+        if not r or not r.get("ok"):
+            return None
+        file_path = r["result"]["file_path"]
+        url = ("https://api.telegram.org/file/bot%s/%s"
+               % (TELEGRAM_BOT_TOKEN, file_path))
+        with urllib.request.urlopen(url, timeout=30) as resp:
+            data = resp.read()
+        ext = file_path.rsplit(".", 1)[-1].lower()
+        mime = {"jpg": "image/jpeg", "jpeg": "image/jpeg",
+                "png": "image/png", "webp": "image/webp"}.get(
+                    ext, "image/jpeg")
+        return data, mime
+    except Exception as e:
+        _loc_log("telegram photo download failed: %r" % e)
+        return None
+
+
+def _extract_workout_from_image(image_bytes, media_type, caption=""):
+    """Claude vision: read a workout summary photo (Fitness app, Watch
+    face, gym equipment display, etc.) and extract structured metrics.
+    Returns a dict or None if unreadable/failed."""
+    try:
+        b64 = base64.b64encode(image_bytes).decode("ascii")
+        client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
+        sys_p = (
+            "You read a photo of a workout summary (iPhone Fitness app, "
+            "Apple Watch face, gym equipment display, or similar) and "
+            "extract structured data. Respond with ONLY a JSON object, no "
+            "markdown fences, no prose, matching exactly this schema: "
+            '{"readable": true|false, "screen": "workouts"|"day_summary", '
+            '"workouts": [{"type": string|null, "dist_km": number|null, '
+            '"dur_min": number|null, "hr_avg": number|null, '
+            '"kcal": number|null}]}. '
+            "\"screen\" is \"day_summary\" when the image shows a daily "
+            "activity summary (rings, total steps, total distance, move "
+            "goals) rather than individual workout sessions - in that "
+            "case return an EMPTY workouts list and never invent a "
+            "workout from daily totals. Otherwise \"screen\" is "
+            "\"workouts\": list EVERY individual workout session visible "
+            "in the image, one object per session, in the order shown. "
+            "Convert any distance to kilometers. \"type\" is a short "
+            "activity name (Running, Cycling, Swimming, Gym, Walking, "
+            "etc), in the same language as any caption provided. Use "
+            "null for any field not visible. Set \"readable\" to false "
+            "ONLY if the image shows no fitness data at all."
+        )
+        user_text = "Extract the workout data from this image."
+        if caption:
+            user_text += " User's caption: " + caption
+        r = client.messages.create(
+            model="claude-sonnet-5", max_tokens=700,
+            system=sys_p,
+            messages=[{"role": "user", "content": [
+                {"type": "image", "source": {"type": "base64",
+                                              "media_type": media_type,
+                                              "data": b64}},
+                {"type": "text", "text": user_text},
+            ]}])
+        parts = [b.text for b in r.content
+                 if getattr(b, "type", None) == "text"]
+        raw = "".join(parts).strip().strip("`")
+        if raw[:4].lower() == "json":
+            raw = raw[4:].strip()
+        data = json.loads(raw)
+        if not data.get("readable"):
+            return None
+        # v5.16r: normalize to the multi-workout shape. Old-style
+        # single-object replies (schema drift) are wrapped into a
+        # one-item list so every caller sees one shape.
+        if not isinstance(data.get("workouts"), list):
+            if any(data.get(k) is not None for k in
+                   ("type", "dist_km", "dur_min", "hr_avg", "kcal")):
+                data["workouts"] = [{k: data.get(k) for k in
+                                     ("type", "dist_km", "dur_min",
+                                      "hr_avg", "kcal")}]
+            else:
+                data["workouts"] = []
+        if data.get("screen") == "day_summary":
+            # never fabricate a workout from daily totals, even if
+            # the model disobeyed and listed some
+            data["workouts"] = []
+        else:
+            data["screen"] = "workouts"
+            data["workouts"] = [w for w in data["workouts"]
+                                if isinstance(w, dict)][:10]
+        return data
+    except Exception as e:
+        _loc_log("workout image extraction failed: %r" % e)
+        return None
+
+
+def _is_geoloc_caption(caption):
+    """v5.16k: detect a photo-geolocation-guess request from a Telegram
+    caption (e.g. "where is this" / a Hebrew equivalent). Deliberately a
+    substring/contains check, not an exact match like
+    _weight_check_intercept - captions are short free text, not fixed
+    commands."""
+    if not caption or not isinstance(caption, str):
+        return False
+    low = caption.strip().lower()
+    en_triggers = ("where is this", "where was this", "where's this",
+                   "geolocate", "guess the location", "guess where",
+                   "where in the world", "location guess",
+                   "where was it taken", "where is it")
+    if any(t in low for t in en_triggers):
+        return True
+    he_triggers = ("\u05d0\u05d9\u05e4\u05d4 \u05d6\u05d4",
+                   "\u05d0\u05d9\u05e4\u05d4 \u05e6\u05d5\u05dc\u05dd",
+                   "\u05e0\u05d7\u05e9 \u05de\u05d9\u05e7\u05d5\u05dd",
+                   "\u05ea\u05e0\u05d7\u05e9 \u05d0\u05d9\u05e4\u05d4",
+                   "\u05d0\u05d9\u05e4\u05d4 \u05d6\u05d5 \u05d4\u05ea\u05de\u05d5\u05e0\u05d4",
+                   "\u05de\u05d9\u05e7\u05d5\u05dd \u05d1\u05ea\u05de\u05d5\u05e0\u05d4")
+    if any(t in caption for t in he_triggers):
+        return True
+    return False
+
+
+def _geoloc_display_fix(d):
+    """v5.16p: display-name convention for this app - results labeled
+    "Palestine"/"West Bank" (any variant, any of city/region/country)
+    are shown as "Judea and Samaria"; Gaza-area results keep
+    "Gaza Strip". Applied to EVERY geolocation guess (trained model
+    and Claude vision) at the exit of the guess functions, so all
+    consumers inherit it. Never raises."""
+    try:
+        if not isinstance(d, dict):
+            return d
+        gaza = any("gaza" in str(d.get(k) or "").lower()
+                   for k in ("city", "region", "country"))
+        repl = "Gaza Strip" if gaza else "Judea and Samaria"
+        for k in ("city", "region", "country"):
+            v = d.get(k)
+            if not v:
+                continue
+            v = re.sub(r"west\s*bank", repl, str(v), flags=re.I)
+            if re.search(r"palestin", v, re.I):
+                v = repl
+            d[k] = v
+        if d.get("region") and d.get("region") == d.get("country"):
+            d["region"] = None
+        if d.get("city") and d.get("city") == d.get("country"):
+            d["city"] = None
+        return d
+    except Exception:
+        return d
+
+
+_OSV5M_LOCAL_URL = "http://127.0.0.1:8850/predict"
+
+
+def _osv5m_local_guess(image_bytes):
+    """v5.16m: ask the local trained geolocation model (osv5m/baseline,
+    ~5.1M real photos, CVPR 2024) for a guess, before falling back to
+    Claude-vision zero-shot guessing. That model runs as a SEPARATE
+    process (geoloc_baseline_server.py, own venv, port 8850, localhost
+    only) - never embedded in this process, so a crash or "not running"
+    there can never affect ACHILLES. Returns a dict shaped exactly like
+    _geoguess_photo()'s own return value, or None if the local service
+    is unreachable, errors, or times out - silent by design, since this
+    is optional infrastructure and Claude vision always works without
+    it."""
+    try:
+        req = urllib.request.Request(
+            _OSV5M_LOCAL_URL,
+            data=json.dumps({
+                "image_b64": base64.b64encode(image_bytes).decode("ascii"),
+            }).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+        )
+        with urllib.request.urlopen(req, timeout=6) as r:
+            result = json.loads(r.read())
+    except Exception as e:
+        _loc_log("osv5m local model unavailable, falling back to "
+                 "Claude vision: %r" % e)
+        return None
+    if not result.get("ok"):
+        return None
+    lat, lon = result.get("lat"), result.get("lon")
+    if not isinstance(lat, (int, float)) or not isinstance(lon, (int, float)):
+        return None
+    return _geoloc_display_fix({
+        "readable": True,
+        "country": result.get("country"),
+        "region": result.get("region"),
+        "city": result.get("city"),
+        "lat": lat,
+        "lon": lon,
+        "confidence": "medium",
+        "reasoning": (
+            "\u05de\u05d5\u05d3\u05dc \u05de\u05d0\u05d5\u05de\u05df \u05e2\u05dc 5.1 \u05de\u05d9\u05dc\u05d9\u05d5\u05df \u05ea\u05de\u05d5\u05e0\u05d5\u05ea \u05d0\u05de\u05d9\u05ea\u05d9\u05d5\u05ea (OSV5M) \u2014 \u05d3\u05d9\u05d5\u05e7 \u05de\u05de\u05d5\u05e6\u05e2: \u05db-68% \u05d1\u05e8\u05de\u05ea \u05de\u05d3\u05d9\u05e0\u05d4, \u05db-39% \u05d1\u05e8\u05de\u05ea \u05d0\u05d6\u05d5\u05e8"
+        ),
+        "source": "osv5m",
+    })
+
+
+def _geoguess_photo(image_bytes, media_type, caption="", use_local=True):
+    """Guess where a photo was taken. v5.16m: tries the local trained
+    model first (osv5m/baseline - see geoloc_baseline_server.py);
+    only falls back to Claude-vision zero-shot guessing (the original
+    v5.16k behavior, unchanged below) if that service isn't running
+    or fails. Never EXIF or file metadata, which is never read either
+    way. Returns a dict or None if neither method can make any
+    reasonable guess."""
+    # v5.16v: the local osv5m model is NO LONGER in the decision
+    # path. Measured on 189 GPS-tagged photos it put 63-73% of
+    # them in the wrong country (median error 1135 km in Israel),
+    # and two-stage fusion returned Claude's own answer anyway
+    # (23.6 km vs 23.6 km in Israel, 2.2 vs 2.3 abroad). Skipping
+    # it costs nothing in accuracy and saves 2 of every 3 API
+    # calls. It stays installed and still shows in compare mode,
+    # so re-enabling is a one-line change once it earns its place
+    # (Israeli fine-tune / retrieval).
+    local = None
+    if local is not None:
+        # v5.16t FUSION: never return the raw model guess directly -
+        # let Claude vision judge it against the pixels first. Any
+        # fusion failure - API down, parse error - falls back to the
+        # raw model guess, i.e. exactly the old v5.16m behavior.
+        fused = _geoloc_fusion_guess(image_bytes, media_type, caption,
+                                     local)
+        if fused is not None:
+            return fused
+        return local
+    try:
+        b64 = base64.b64encode(image_bytes).decode("ascii")
+        client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
+        # v5.16x: structured-evidence prompt. The model now works
+        # through an explicit evidence scan and competing candidates
+        # in a scratchpad BEFORE committing, then ends with one
+        # marked FINAL_JSON line (parser below). Motivated by the
+        # Lloret de Mar blind test: right coastline family, wrong -
+        # but more famous - riviera. Output schema is unchanged.
+        sys_p = (
+            "You are an expert visual geolocator. You determine where "
+            "a photo was taken using ONLY what is visible in the frame "
+            "- never EXIF or file metadata, which you cannot see "
+            "anyway.\n\n"
+            "METHOD - work through these steps in order, writing your "
+            "observations as you go. This text is a scratchpad; only "
+            "the final line is parsed.\n"
+            "1. EVIDENCE SCAN - note what you can actually see in each "
+            "family: vegetation and climate (species, dryness, "
+            "season); architecture (roof shapes and materials, wall "
+            "finishes, shutters, balconies, age, density); text and "
+            "scripts (read every legible sign, even partial - the "
+            "script alone narrows the region); road furniture "
+            "(marking colors, curb style, guardrails, bollards, "
+            "signposts); driving side and vehicles (models, taxis, "
+            "buses, plate shape and color); terrain and coastline "
+            "morphology (rock type, slope, water color); sun and "
+            "shadows (rough latitude); people and dress.\n"
+            "2. CANDIDATES - name 2-3 specific candidate regions that "
+            "fit, each with its strongest point FOR and AGAINST. "
+            "Include at least one LESS FAMOUS look-alike: tourist "
+            "coasts, alpine towns and beach resorts are routinely "
+            "mistaken for their most famous example - a Costa Brava "
+            "cove is not Saint-Tropez, a Black Sea resort is not the "
+            "Cote d Azur. Famousness is not evidence.\n"
+            "3. DISCRIMINATE - pick the single detail that best "
+            "separates your candidates and decide from it. If nothing "
+            "separates them, take the strongest total evidence and "
+            "lower your confidence.\n"
+            "4. COMMIT - one final location. Never output a compromise "
+            "point between candidates - it lands in the sea or in a "
+            "random field. lat/lon must be INSIDE your chosen "
+            "locality.\n\n"
+            "CONFIDENCE calibration: high = you would bet the true "
+            "spot is within 25 km; medium = within 150 km; low = "
+            "confident only at country level or less. Honest low "
+            "confidence is worth more than a lucky-looking guess.\n\n"
+            "End your reply with exactly one line:\n"
+            "FINAL_JSON: {\"readable\": true|false, \"country\": "
+            "string|null, \"region\": string|null, \"city\": "
+            "string|null, \"lat\": number|null, \"lon\": "
+            "number|null, \"confidence\": \"high\"|\"medium\"|"
+            "\"low\", \"reasoning\": string}\n"
+            "\"reasoning\" is 1-2 short sentences naming the "
+            "decisive visual cues, in the same language as any "
+            "caption provided (a Hebrew caption gets Hebrew "
+            "reasoning). Always give your best guess even at low "
+            "confidence - set \"readable\" false ONLY if the image "
+            "has no usable visual signal at all (e.g. an extreme "
+            "close-up with no context)."
+        )
+        user_text = "Where was this photo taken?"
+        if caption:
+            user_text += " User's caption: " + caption
+        r = client.messages.create(
+            model="claude-sonnet-5", max_tokens=900,
+            system=sys_p,
+            messages=[{"role": "user", "content": [
+                {"type": "image", "source": {"type": "base64",
+                                              "media_type": media_type,
+                                              "data": b64}},
+                {"type": "text", "text": user_text},
+            ]}])
+        parts = [b.text for b in r.content
+                 if getattr(b, "type", None) == "text"]
+        raw = "".join(parts).strip()
+        # v5.16x: the reply is now scratchpad + one marked line.
+        # Parse from the marker; if the model ever drops the marker,
+        # fall back to the old whole-reply-is-JSON parse so format
+        # drift degrades gracefully instead of failing.
+        m = raw.rfind("FINAL_JSON:")
+        if m >= 0:
+            data = json.loads(
+                raw[m + len("FINAL_JSON:"):].strip().strip("`"))
+        else:
+            fb = raw.strip("`")
+            if fb[:4].lower() == "json":
+                fb = fb[4:].strip()
+            data = json.loads(fb)
+        if not data.get("readable"):
+            return None
+        return _geoloc_display_fix(data)
+    except Exception as e:
+        _loc_log("geoguess image extraction failed: %r" % e)
+        return None
+
+
+def _geoloc_fusion_guess(image_bytes, media_type, caption, candidate,
+                         blind=None):
+    """v5.16u FUSION (two-stage, anchor-free): stage 1 asks Claude to
+    geolocate the photo BLIND - it never sees the local model's
+    guess, so it cannot be anchored by a wrong candidate. Stage 2
+    shows Claude its own committed answer alongside the model's
+    candidate and asks it to reconcile, defaulting to KEEP its blind
+    answer unless the candidate clearly helps. This replaces the
+    v5.16t single-call design, which leaked the candidate into the
+    only reasoning step and measurably dragged good answers toward
+    bad candidates. Callers may pass an already-computed blind guess
+    (compare mode does) to avoid a duplicate API call. Returns a dict
+    with source "fusion" and fusion_action "kept"/"refined"/
+    "overridden", or None on failure - callers then fall back to the
+    raw candidate, so fusion can only ever match or beat v5.16m."""
+    try:
+        cand_lat, cand_lon = candidate.get("lat"), candidate.get("lon")
+        if not isinstance(cand_lat, (int, float)) or \
+                not isinstance(cand_lon, (int, float)):
+            return None
+        cand_place = ", ".join(
+            [p for p in (candidate.get("city"), candidate.get("region"),
+                         candidate.get("country")) if p]) or "unnamed area"
+        if blind is None:
+            blind = _geoguess_photo(image_bytes, media_type, caption,
+                                    use_local=False)
+        if not blind or not blind.get("readable"):
+            return None
+        b_lat, b_lon = blind.get("lat"), blind.get("lon")
+        if not isinstance(b_lat, (int, float)) or \
+                not isinstance(b_lon, (int, float)):
+            return None
+        b_place = ", ".join(
+            [p for p in (blind.get("city"), blind.get("region"),
+                         blind.get("country")) if p]) or "unnamed area"
+        b64 = base64.b64encode(image_bytes).decode("ascii")
+        client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
+        schema = (
+            '{"readable": true, "country": string|null, "region": '
+            'string|null, "city": string|null, "lat": number|null, '
+            '"lon": number|null, "confidence": "high"|"medium"|"low", '
+            '"fusion_action": "kept"|"refined"|"overridden", '
+            '"reasoning": string}'
+        )
+        sys_p = (
+            "You already geolocated a photo from visual clues alone. "
+            "Now you are shown TWO location estimates for the SAME "
+            "photo: (A) your own independent estimate, and (B) a "
+            "candidate from a separate locally-trained model. That "
+            "model places roughly 1 photo in 3 in the wrong country "
+            "entirely, but when its country is right it can be more "
+            "precise than unaided guessing. Decide the final answer by "
+            "these rules, in order. (1) DEFAULT to your own estimate "
+            "(A). (2) Only if B is in the same country and roughly the "
+            "same region as A, AND you were not confident about the "
+            "exact spot, may you adopt B's coordinates as a more "
+            "precise fix - set action \"refined\". (3) If A and B "
+            "disagree on country or region, KEEP A and set action "
+            "\"kept\" - do NOT move toward B. (4) Set action "
+            "\"overridden\" only if, looking again, you are now "
+            "convinced B is right and A was your own mistake - not "
+            "merely because B exists. ISRAEL PLATE CHECK: if the photo "
+            "shows a vehicle with a clearly Israeli plate - reflective "
+            "YELLOW front and rear, black digits, a narrow BLUE stripe "
+            "on the left with the Israeli flag and \"IL\" - treat "
+            "country as Israel with high confidence and reject any "
+            "candidate placing it elsewhere (neighbouring countries "
+            "use white plates; Palestinian-Authority plates are green "
+            "and white). This is a neutral visual check on a physical "
+            "object. Respond with ONLY a JSON object, no markdown "
+            "fences, no prose, matching exactly this schema: " + schema +
+            ". \"reasoning\" is 1-2 short sentences in the same "
+            "language as any caption provided, naming why you kept, "
+            "refined, or overrode."
+        )
+        user_text = (
+            "Estimate A (yours): lat %.5f, lon %.5f - %s.\n"
+            "Candidate B (local model): lat %.5f, lon %.5f - %s.\n"
+            "Give the final reconciled answer." % (
+                b_lat, b_lon, b_place, cand_lat, cand_lon, cand_place))
+        if caption:
+            user_text += " User's caption: " + caption
+        r = client.messages.create(
+            model="claude-sonnet-5", max_tokens=400,
+            system=sys_p,
+            messages=[{"role": "user", "content": [
+                {"type": "image", "source": {"type": "base64",
+                                              "media_type": media_type,
+                                              "data": b64}},
+                {"type": "text", "text": user_text},
+            ]}])
+        parts = [b.text for b in r.content
+                 if getattr(b, "type", None) == "text"]
+        raw = "".join(parts).strip().strip("`")
+        if raw[:4].lower() == "json":
+            raw = raw[4:].strip()
+        result = json.loads(raw)
+        if not result.get("readable"):
+            blind["source"] = "fusion"
+            blind["fusion_action"] = "kept"
+            return _geoloc_display_fix(blind)
+        if result.get("fusion_action") not in (
+                "kept", "refined", "overridden"):
+            result["fusion_action"] = "kept"
+        if not isinstance(result.get("lat"), (int, float)) or \
+                not isinstance(result.get("lon"), (int, float)):
+            result["lat"], result["lon"] = b_lat, b_lon
+        result["source"] = "fusion"
+        return _geoloc_display_fix(result)
+    except Exception as e:
+        _loc_log("geoloc fusion failed, falling back to raw "
+                 "candidate: %r" % e)
+        return None
+
+
+def _tg_geoloc_confirmation_text(data, lang="he"):
+    """v5.16k: format a _geoguess_photo() result for a Telegram reply."""
+    loc_parts = [p for p in (data.get("city"), data.get("region"),
+                              data.get("country")) if p]
+    if loc_parts:
+        loc = ", ".join(loc_parts)
+    elif lang == "he":
+        loc = ("\u05dc\u05d0 \u05d4\u05e6\u05dc\u05d7\u05ea\u05d9 \u05dc\u05d0\u05de\u05d5\u05d3 "
+               "\u05de\u05d9\u05e7\u05d5\u05dd \u05de\u05d3\u05d5\u05d9\u05e7")
+    else:
+        loc = "couldn't pin down a specific place"
+    conf_raw = (data.get("confidence") or "").lower()
+    if lang == "he":
+        conf_map = {"high": "\u05d2\u05d1\u05d5\u05d4",
+                    "medium": "\u05d1\u05d9\u05e0\u05d5\u05e0\u05d9",
+                    "low": "\u05e0\u05de\u05d5\u05da"}
+    else:
+        conf_map = {"high": "high", "medium": "medium", "low": "low"}
+    conf = conf_map.get(conf_raw, conf_raw or "?")
+    lat, lon = data.get("lat"), data.get("lon")
+    coord = ""
+    if isinstance(lat, (int, float)) and isinstance(lon, (int, float)):
+        coord = " (%.4f, %.4f)" % (lat, lon)
+    reasoning = (data.get("reasoning") or "").strip()
+    if data.get("source") == "fusion":
+        pin = "\U0001F500"  # shuffle: fused model-plus-vision path
+        tag = ("\u05de\u05e9\u05d5\u05dc\u05d1 - \u05de\u05d5\u05d3\u05dc + \u05e8\u05d0\u05d9\u05d9\u05d4"
+               if lang == "he" else "fused - model + vision")
+        head = "%s %s%s \u2014 %s" % (pin, loc, coord, tag)
+    elif data.get("source") == "osv5m":
+        pin = "\U0001F3AF"  # target: marks the trained-model path,
+                            # distinct from the Claude-vision pin below
+        tag = ("\u05de\u05d5\u05d3\u05dc \u05de\u05d0\u05d5\u05de\u05df" if lang == "he"
+               else "trained model")
+        head = "%s %s%s \u2014 %s" % (pin, loc, coord, tag)
+    else:
+        pin = "\U0001F4CD"
+        if lang == "he":
+            head = "%s %s%s \u2014 \u05d1\u05d9\u05d8\u05d7\u05d5\u05df %s" % (
+                pin, loc, coord, conf)
+        else:
+            head = "%s %s%s \u2014 confidence: %s" % (pin, loc, coord, conf)
+    return head + ("\n" + reasoning if reasoning else "")
+
+
+def _training_log_add_workout_from_extract(data, src="photo", when=None):
+    """Write an extracted workout into training_log.json - same schema
+    and caps as the /training_workout HTTP endpoint. Returns the written
+    entry dict, or None on failure. v5.16q: optional when= (a
+    pre-validated YYYY-MM-DD string) logs the workout under that date
+    instead of today - for uploads the owner forgot to send on the
+    day itself."""
+    try:
+        p = Path(__file__).resolve().parent / "training_log.json"
+        today = datetime.date.today().isoformat()
+        entry_date = when or today
+        with _training_lock:
+            try:
+                log = json.loads(p.read_text(encoding="utf-8"))
+            except Exception:
+                log = {}
+            log.setdefault("weight_target_min_kg", 68)
+            workouts = log.setdefault("workouts", [])
+            entry = {"d": entry_date, "t": (data.get("type") or "Workout")[:80],
+                     "src": src}
+            for qk, jk in (("dist_km", "km"), ("dur_min", "min"),
+                           ("hr_avg", "hr"), ("kcal", "kcal")):
+                v = data.get(qk)
+                if isinstance(v, (int, float)) and v > 0:
+                    entry[jk] = round(float(v), 1)
+            workouts.append(entry)
+            workouts.sort(key=lambda w: w.get("d", ""))
+            del workouts[:-120]
+            if entry["d"] >= (log.get("last_workout_date") or ""):
+                log["last_workout_type"] = entry["t"]
+                log["last_workout_date"] = entry["d"]
+            cut = (datetime.date.today()
+                   - datetime.timedelta(days=6)).isoformat()
+            log["weekly_workouts"] = sum(
+                1 for w in workouts if (w.get("d") or "") >= cut)
+            p.write_text(json.dumps(log, ensure_ascii=False, indent=2),
+                        encoding="utf-8")
+        return entry
+    except Exception as e:
+        _loc_log("training log write (photo) failed: %r" % e)
+        return None
+
+
+def _tg_photo_confirmation_text(entry):
+    parts = [entry.get("t", "Workout")]
+    if "min" in entry: parts.append(str(entry["min"]) + " \u05d3\u05e7\u05d5\u05ea")
+    if "km" in entry: parts.append(str(entry["km"]) + " km")
+    if "hr" in entry: parts.append("\u05d3\u05d5\u05e4\u05e7 \u05de\u05de\u05d5\u05e6\u05e2 " + str(entry["hr"]))
+    if "kcal" in entry: parts.append(str(entry["kcal"]) + " \u05e7\u05dc\u05d5\u05e8\u05d9\u05d5\u05ea")
+    return "\u2705 \u05e0\u05e8\u05e9\u05dd: " + " \u00b7 ".join(parts)
+
 
 def _tg_load_chat():
     global _tg_chat_id
@@ -7376,61 +11582,125 @@ class App:
         self.req_typing = False
 
         root.title("ACHILLES")
+        # v4.82: RE-TESTING overrideredirect(True) for the borderless floating-orb
+        # look. v4.79 removed it because it was invisible - but at the time the
+        # window was being dynamically parked off-screen and un-parked on every
+        # wake (the actual trigger for the Windows/DWM compositing failure).
+        # Since v4.81 the window is created once and never moves again, so that
+        # specific dynamic no longer exists. This is a deliberate, logged
+        # experiment, not an assumption - orb_diag.log will show which branch ran.
         root.overrideredirect(True)
-        # --- ACHILLES taskbar presence (achilles_taskbar_icon) -------------
+        # v4.79: taskbar-anchor Toplevel hack REMOVED. It existed only to give
+        # a borderless overrideredirect window a taskbar presence; a normal
+        # bordered window (see above) already gets one for free, and this extra
+        # off-screen Toplevel was also a plausible source of z-order/focus
+        # interference with the main window's painting.
         try:
-            _ico = os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                                "achilles.ico")
-            try:
-                import ctypes
-                ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(
-                    u"horn.achilles.jarvis")
-            except Exception:
-                pass
-            self._taskbar_anchor = tk.Toplevel(root)
-            _tb = self._taskbar_anchor
-            _tb.title("ACHILLES")
-            _tb.geometry("1x1+-32000+-32000")
-            _tb.attributes("-topmost", False)
+            _ico = os.path.join(os.path.dirname(os.path.abspath(__file__)), "achilles.ico")
             if os.path.isfile(_ico):
-                try:
-                    _tb.iconbitmap(default=_ico)
-                except Exception:
-                    try:
-                        _tb.iconbitmap(_ico)
-                    except Exception:
-                        pass
                 try:
                     root.iconbitmap(default=_ico)
                 except Exception:
                     pass
-            def _on_anchor_close():
-                try:
-                    self.stop = True
-                except Exception:
-                    pass
-                try:
-                    root.destroy()
-                except Exception:
-                    pass
-            _tb.protocol("WM_DELETE_WINDOW", _on_anchor_close)
+            import ctypes
+            ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(u"horn.achilles.jarvis")
         except Exception as _e:
-            print("[diag] taskbar anchor not created:", repr(_e))
-        # -------------------------------------------------------------------
+            print("[diag] taskbar icon setup skipped:", repr(_e))
+        def _on_anchor_close():
+            try:
+                self.stop = True
+            except Exception:
+                pass
+            try:
+                root.destroy()
+            except Exception:
+                pass
+        root.protocol("WM_DELETE_WINDOW", _on_anchor_close)
+        # v4.76: file-based orb diagnostics, defined here (before first use).
+        # pythonw has no console, so plain print() of errors in the render/show
+        # path is invisible - this makes them visible in orb_diag.log next to jarvis.py.
+        def _orb_log(msg):
+            try:
+                _p = os.path.join(os.path.dirname(os.path.abspath(__file__)), "orb_diag.log")
+                with open(_p, "a", encoding="utf-8") as _f:
+                    _f.write("[%s] %s\n" % (datetime.datetime.now().strftime("%H:%M:%S"), msg))
+            except Exception:
+                pass
+        self._orb_log = _orb_log
         root.attributes("-topmost", True)
+        # v4.83: RE-ENABLING transparency. v4.78 disabled it as a diagnostic
+        # step when NOTHING was visible; v4.79-v4.82 since showed the real
+        # trigger was the old dynamic off-screen park/un-park cycle (gone since
+        # v4.81), not transparency itself. With overrideredirect now confirmed
+        # working on a static window (v4.82 screenshot), transparency is the
+        # remaining piece for the true floating-orb look (no visible box).
         try:
             root.attributes("-transparentcolor", KEY)
-        except Exception:
-            pass
+            self._orb_log("v4.83 transparentcolor RE-ENABLED key=%s" % KEY)
+        except Exception as _e:
+            self._orb_log("v4.83 transparentcolor FAILED: %r" % (_e,))
         root.config(bg=KEY)
-        root.geometry("%dx%d+%d+%d" % (self.EW, self.EH, self.ex, self.ey))
-        root.withdraw()  # start fully hidden
+        self._geo_on  = "%dx%d+%d+%d" % (self.EW, self.EH, self.ex, self.ey)
+        self._geo_off = "%dx%d+-32000+-32000" % (self.EW, self.EH)
+        # v4.75: park off-screen instead of withdraw(). On Windows an
+        # overrideredirect(True) window that is withdraw()n often refuses
+        # to re-map via deiconify(), so the orb never reappears. Keeping it
+        # always-mapped but parked off-screen avoids deiconify entirely.
+        # v4.81: STOP HIDING THE ORB. Five straight patches (v4.75-v4.80) tried to
+        # fix the hide/show transition itself and each uncovered a new failure mode
+        # in it. The window now stays on-screen, in place, from boot onward -
+        # permanently. This is a deliberate simplification, not a workaround: if
+        # showing-after-hiding is what keeps breaking, the fix is to never hide.
+        # The orb still visually reflects idle/listening/speaking/thinking via its
+        # own animation state - it just never leaves the screen.
+        root.geometry(self._geo_on)
+        self._orb_log("BOOT sw=%d EW=%d EH=%d ex=%d ey=%d geo_on=%r (always-on-screen mode)"
+                       % (sw, self.EW, self.EH, self.ex, self.ey, self._geo_on))
+        # v4.91: write the EXACT running file path + PID somewhere impossible
+        # to confuse with any log inside the project folder - answers "which
+        # jarvis.py is actually executing" with certainty, no ambiguity.
+        try:
+            _this_file = os.path.abspath(__file__)
+            _ver_line = "(unknown)"
+            try:
+                with open(_this_file, encoding="utf-8") as _vf:
+                    _lines = _vf.readlines()
+                    if len(_lines) > 3:
+                        _ver_line = _lines[3].strip()
+            except Exception:
+                pass
+            _wf = os.path.join(os.path.dirname(_this_file), "which_jarvis_is_running.txt")
+            _content = ("Running file: %s\nPID: %d\nStarted: %s\nVersion line: %s\n"
+                        % (_this_file, os.getpid(),
+                           datetime.datetime.now().isoformat(), _ver_line))
+            with open(_wf, "w", encoding="utf-8") as _f:
+                _f.write(_content)
+        except Exception as _e:
+            self._orb_log("which_jarvis_is_running.txt write FAILED: %r" % (_e,))
+        def _snapshot():
+            try:
+                self._orb_log("SNAPSHOT viewable=%s state=%s x=%d y=%d w=%d h=%d cv=%dx%d pil=%s mode=%s req_mode=%s"
+                              % (root.winfo_viewable(), root.state(), root.winfo_x(), root.winfo_y(),
+                                 root.winfo_width(), root.winfo_height(),
+                                 self.cv.winfo_width(), self.cv.winfo_height(), self.use_pil,
+                                 self.mode, self.req_mode))
+            except Exception as _e:
+                self._orb_log("SNAPSHOT FAILED: %r" % (_e,))
+        root.after(800, _snapshot)
 
         self.SS = 3  # supersample factor for Pillow anti-aliasing (higher = smoother but heavier)
         self.use_pil = HAVE_PIL
 
         self.cv = tk.Canvas(root, bg=KEY, highlightthickness=0, bd=0)
         self.cv.pack(fill=tk.BOTH, expand=True)
+        # v4.83: border rectangle REMOVED - with transparency back on, a solid
+        # rectangle outline is exactly what makes it look like "a window" instead
+        # of a floating orb. Title text kept, floating with no box behind it.
+        try:
+            self.cv.create_text(self.EW // 2, 16, text="A C H I L L E S",
+                                fill="#f0a050", font=("Segoe UI", 10, "bold"))
+        except Exception as _e:
+            self._orb_log("static chrome FAILED: %r" % (_e,))
 
         self.entry = tk.Entry(root, bg="#161b22", fg="#e6edf3",
                               insertbackground="#58a6ff", relief=tk.FLAT,
@@ -7991,7 +12261,7 @@ class App:
             # v4.67: apply on the main thread right now so the visual feedback
             # (the orb) pops the instant the wake fires, not on the next tick.
             try:
-                self.ui(self._apply_mode)
+                self.ui(self._force_show)
             except Exception:
                 pass
 
@@ -7999,22 +12269,99 @@ class App:
         self.req_typing = False
         self.req_mode = "hidden"
 
+    def _force_show(self):
+        # v4.71: guard-free, unconditional re-show for the wake path. animate()'s
+        # _apply_mode only reacts to a req_mode!=mode transition; if self.mode ever
+        # desyncs from the real window state (it did after a hide/show cycle), the
+        # orb stayed withdrawn on the next wake even though req_mode was "expanded".
+        # This forces the window visible and to the front every time, and is safe
+        # because it only runs on wake (not on every animation tick).
+        self.mode = "expanded"
+        self.req_mode = "expanded"
+        self._orb_log("_force_show ENTER geo_on=%r state=%r" % (self._geo_on, self.root.state()))
+        try:
+            # v4.80: since v4.79 dropped overrideredirect, this is now a REAL
+            # window that can genuinely be minimized/iconic. Confirmed by testing:
+            # the orb showed on boot but never again on repeat wakes - a normal
+            # window parked off-screen for a while can end up iconic, and
+            # .geometry() alone does not restore visibility from that state;
+            # deiconify()+state('normal') are required first.
+            self.root.deiconify()
+            self.root.state("normal")
+            self.root.geometry(self._geo_on)
+            self.root.lift()
+            self.root.attributes("-topmost", False)
+            self.root.attributes("-topmost", True)
+            self.root.attributes("-alpha", 1.0)  # v4.84: force fully opaque on wake
+            self.root.focus_force()
+            self.root.update_idletasks()
+            self._orb_log("_force_show OK viewable=%s state=%s x=%d y=%d" %
+                          (self.root.winfo_viewable(), self.root.state(),
+                           self.root.winfo_x(), self.root.winfo_y()))
+        except Exception as _e:
+            self._orb_log("_force_show FAILED: %r" % (_e,))
+
     def _apply_mode(self):
-        if self.req_mode != self.mode:
+        # v4.77: level-triggered, not edge-triggered. The orb_diag.log evidence
+        # showed _force_show() successfully call .geometry(geo_on), then
+        # immediately read back the OLD off-screen coordinates - something else
+        # (a delayed _hide() from the prior turn, racing on the Tk main thread)
+        # was reverting it within the same tick. Reacting only to a req_mode!=mode
+        # transition means a lost race stays lost forever. Re-asserting the target
+        # geometry on EVERY tick (~33ms) instead means any such race self-heals
+        # within one frame - the user sees at most a ~33ms flicker, not a
+        # permanently invisible orb.
+        try:
+            # v4.81: mode/req_mode is kept ONLY for the animation-throttle switch
+            # below (slower tick + frozen frame while "hidden") and the typing-box
+            # placement. It no longer controls window position - the window always
+            # stays at self._geo_on. This is the self-heal check, just permanently
+            # targeting the one on-screen spot instead of toggling on/off.
             self.mode = self.req_mode
-            if self.mode == "expanded":
-                self.root.deiconify()
+            try:
+                cur_x, cur_y = self.root.winfo_x(), self.root.winfo_y()
+                iconic = (self.root.state() != "normal")
+            except Exception:
+                cur_x = cur_y = None
+                iconic = False
+            mismatched = (cur_x is not None and (cur_x != self.ex or cur_y != self.ey))
+            if mismatched or iconic:
+                if iconic:
+                    self.root.deiconify()
+                    self.root.state("normal")
+                self.root.geometry(self._geo_on)
                 self.root.lift()
                 self.root.attributes("-topmost", True)
-            else:
-                self.root.withdraw()
-        if self.req_typing != self.typing:
-            self.typing = self.req_typing
-            if self.typing and self.mode == "expanded":
-                self.entry.place(relx=0.5, rely=1.0, y=-12, anchor="s", relwidth=0.82)
-                self.entry.focus_set()
-            else:
-                self.entry.place_forget()
+                self._orb_log("_apply_mode SELF-HEAL was=(%s,%s) expected=(%s,%s) iconic=%s" %
+                              (cur_x, cur_y, self.ex, self.ey, iconic))
+            # v4.84: visibility is now controlled ONLY via whole-window alpha
+            # (opacity), never geometry/withdraw/deiconify. The window itself
+            # never moves or changes state - it just fades to fully transparent
+            # (alpha=0) when "hidden" and back to opaque (alpha=1) when
+            # "expanded". This is orthogonal to every mechanism that broke
+            # earlier today (position, iconic state, overrideredirect mapping).
+            target_alpha = 1.0 if self.mode == "expanded" else 0.0
+            try:
+                cur_alpha = float(self.root.attributes("-alpha"))
+            except Exception:
+                cur_alpha = None
+            if cur_alpha is None or abs(cur_alpha - target_alpha) > 0.01:
+                try:
+                    self.root.attributes("-alpha", target_alpha)
+                    self._orb_log("_apply_mode ALPHA was=%s target=%s mode=%s" %
+                                  (cur_alpha, target_alpha, self.mode))
+                except Exception as _ea:
+                    self._orb_log("_apply_mode ALPHA FAILED: %r" % (_ea,))
+            if self.req_typing != self.typing:
+                self.typing = self.req_typing
+                if self.typing and self.mode == "expanded":
+                    self.entry.place(relx=0.5, rely=1.0, y=-12, anchor="s", relwidth=0.82)
+                    self.entry.focus_set()
+                else:
+                    self.entry.place_forget()
+        except Exception as _e:
+            self._orb_log("_apply_mode FAILED: %r" % (_e,))
+            raise
 
     # ---- interactions ----
     def _show_menu(self, e):
@@ -8108,7 +12455,7 @@ class App:
             return "Speaking..."
         if self.typing:
             return "Type and press Enter"
-        return "Listening for 'Hey JARVIS'" if self.wake_on else "Wake word OFF"
+        return "Listening for 'Achilles'" if self.wake_on else "Wake word OFF"
 
     # ---- desktop-icon signal watcher ----
     def _signal_watch(self):
@@ -8201,7 +12548,7 @@ class App:
             speak(brief)
         except Exception:
             pass
-        time.sleep(min(14.0, max(3.0, len(brief.split()) * 0.45)))
+        time.sleep(_POST_SPEAK_GUARD_S)
 
     def _maybe_auto_backup(self):
         """v4.31: first launch of a calendar day -> background vault
@@ -8259,13 +12606,17 @@ class App:
         for a follow-up (conversation mode), False to end."""
         self.state = "listening"
         if first:
+            self._q_chain = 0
             # use the pre-roll captured at wake time so the first word survives
             pr = getattr(self, "_preroll", None)
             self._preroll = None
             af = record_until_silence(preroll=pr)
         else:
-            # follow-up: give up if no speech starts within a few seconds
-            af = record_followup(start_timeout=5.0)
+            # follow-up: give up if no speech starts within a few seconds.
+            # After JARVIS asks a question we widen this window (set below).
+            _to = getattr(self, "_next_followup_timeout", 5.0)
+            self._next_followup_timeout = 5.0
+            af = record_followup(start_timeout=_to)
             if af is None:
                 return False  # no follow-up -> end the conversation
         self.state = "thinking"
@@ -8317,8 +12668,8 @@ class App:
             self._last_reply = brief
             self.state = "speaking"
             speak(brief)
-            time.sleep(min(14.0, max(3.0, len(brief.split()) * 0.45)))
-            return True  # keep the conversation open for follow-ups
+            time.sleep(_POST_SPEAK_GUARD_S)
+            return False  # v4.72: end after the briefing; wake again for more
         # Graceful goodbye: if the user is clearly ending the chat, give a short
         # sign-off (in their language) instead of silently closing.
         if detect_goodbye(user_text):
@@ -8330,7 +12681,7 @@ class App:
             self._last_reply = bye
             self.state = "speaking"
             speak(bye)
-            time.sleep(min(8.0, max(2.0, len(bye.split()) * 0.45)))
+            time.sleep(_POST_SPEAK_GUARD_S)
             return False  # end the conversation after the farewell
         self._push("You", user_text)
         # Lock reply language to what Whisper detected (he/en), so Hebrew speech
@@ -8344,6 +12695,25 @@ class App:
             reply = re.sub(r'<\s*END\s*>', '', reply, flags=re.IGNORECASE).strip()
             if not reply:
                 reply = pick_farewell(lang == "he")
+        # v5.17: close a spoken answer by offering more, so the floor is
+        # explicitly handed back. Skipped when the brain already marked a
+        # dismissal (<END>) - being asked "anything else?" right after saying
+        # goodbye is exactly the annoyance this must avoid - and skipped when
+        # the reply is itself a question, since two questions in a row is
+        # worse than none.
+        # v5.17b: FIRST-TURN ONLY. Appending on every follow-up turn too
+        # manufactures a question mark on almost every reply, which feeds
+        # straight into the existing keep-listening-if-a-question mechanic
+        # below - directly undoing the v4.72 "one command per wake" guard
+        # against runaway follow-up chains. A decline that is not on the
+        # fixed GOODBYE_WORDS list and that the model does not confidently
+        # tag <END> would then get ANOTHER manufactured offer, repeating.
+        # Restricting to first keeps the close-with-an-offer behaviour
+        # exactly once per wake, and lets the existing goodbye/<END> paths
+        # release normally on whatever the user says next.
+        if first and (not end_now) and reply and not _is_question(reply):
+            reply = reply.rstrip() + " " + pick_followup_offer(
+                lang == "he" or is_mostly_hebrew(reply))
         self._push("JARVIS", reply)
         save_log(user_text, reply)
         # Remember this exchange for the function keys (F2 save / F3 repeat).
@@ -8351,8 +12721,19 @@ class App:
         self._last_reply = reply
         self.state = "speaking"
         speak(reply)
-        time.sleep(min(12.0, max(2.0, len(reply.split()) * 0.45)))
-        return not end_now  # end the conversation if the brain signalled dismissal
+        time.sleep(_POST_SPEAK_GUARD_S)
+        # v5.10: if JARVIS's own reply is a QUESTION, keep the mic open and wait
+        # for the answer (no wake word needed) instead of ending. The chain cap
+        # plus the follow-up silence timeout prevent any runaway loop.
+        if (not end_now) and _is_question(reply):
+            self._q_chain = getattr(self, "_q_chain", 0) + 1
+            if self._q_chain <= 5:
+                self._next_followup_timeout = 8.0
+                return True
+        self._q_chain = 0
+        return False  # v4.72: one command per wake - end after answering so
+        # background noise can't trip an endless follow-up/hallucinate loop.
+        # (Say the wake word again for another command; it's instant now.)
 
     def _typed_turn(self, text):
         try:
@@ -8371,7 +12752,7 @@ class App:
                 self._last_reply = brief
                 self.state = "speaking"
                 speak(brief)
-                time.sleep(min(14.0, max(3.0, len(brief.split()) * 0.45)))
+                time.sleep(_POST_SPEAK_GUARD_S)
                 return
             reply = think(text, self.memory, lang)
             self._push("JARVIS", reply)
@@ -8381,7 +12762,7 @@ class App:
             self._last_reply = reply
             self.state = "speaking"
             speak(reply)
-            time.sleep(min(12.0, max(2.5, len(reply.split()) * 0.45)))
+            time.sleep(_POST_SPEAK_GUARD_S)
         except Exception as e:
             self._push("System", "Error: " + str(e))
         finally:
@@ -8437,9 +12818,58 @@ class App:
             for upd in r.get("result", []):
                 _tg_offset = upd["update_id"] + 1
                 msg = upd.get("message") or upd.get("edited_message")
-                if not msg or "text" not in msg:
+                if not msg:
                     continue
                 cid = msg["chat"]["id"]
+                # --- photo -> workout auto-log (v5.16e) ---
+                if ("photo" in msg and _tg_chat_id is not None
+                        and cid == _tg_chat_id):
+                    photos = msg.get("photo") or []
+                    caption = (msg.get("caption") or "").strip()
+                    dl = (_tg_download_photo(photos[-1]["file_id"])
+                          if photos else None)
+                    if not dl:
+                        telegram_send(
+                            "\u274c \u05db\u05e9\u05dc\u05d5\u05df \u05d1\u05d4\u05d5\u05e8\u05d3\u05ea \u05d4\u05ea\u05de\u05d5\u05e0\u05d4.", cid)
+                        continue
+                    if _is_geoloc_caption(caption):
+                        guess = _geoguess_photo(dl[0], dl[1], caption)
+                        if not guess:
+                            telegram_send(
+                                "\u274c \u05dc\u05d0 \u05d4\u05e6\u05dc\u05d7\u05ea\u05d9 \u05dc\u05e0\u05d7\u05e9 \u05de\u05d9\u05e7\u05d5\u05dd \u05de\u05d4\u05ea\u05de\u05d5\u05e0\u05d4 \u05d4\u05d6\u05d0\u05ea.", cid)
+                            continue
+                        telegram_send(_tg_geoloc_confirmation_text(guess), cid)
+                        continue
+                    extracted = _extract_workout_from_image(
+                        dl[0], dl[1], caption)
+                    if not extracted:
+                        telegram_send(
+                            "\u274c \u05dc\u05d0 \u05d4\u05e6\u05dc\u05d7\u05ea\u05d9 \u05dc\u05d6\u05d4\u05d5\u05ea \u05e0\u05ea\u05d5\u05e0\u05d9 \u05d0\u05d9\u05de\u05d5\u05df \u05d1\u05ea\u05de\u05d5\u05e0\u05d4.", cid)
+                        continue
+                    if extracted.get("screen") == "day_summary":
+                        telegram_send(
+                            "\u2139\ufe0f \u05d6\u05d4 \u05de\u05e1\u05da \u05e1\u05d9\u05db\u05d5\u05dd \u05d9\u05d5\u05de\u05d9 - \u05e1\u05da \u05d4\u05db\u05dc \u05d9\u05d5\u05de\u05d9, \u05dc\u05d0 \u05d0\u05d9\u05de\u05d5\u05e0\u05d9\u05dd \u05d1\u05d5\u05d3\u05d3\u05d9\u05dd. \u05e9\u05dc\u05d7 \u05e6\u05d9\u05dc\u05d5\u05dd \u05e9\u05dc \u05e8\u05e9\u05d9\u05de\u05ea \u05d4\u05d0\u05d9\u05de\u05d5\u05e0\u05d9\u05dd \u05d5\u05d0\u05e8\u05e9\u05d5\u05dd \u05db\u05dc \u05d0\u05d7\u05d3.", cid)
+                        continue
+                    _wl = extracted.get("workouts") or []
+                    _entries = []
+                    for _w in _wl:
+                        _e = _training_log_add_workout_from_extract(_w)
+                        if _e:
+                            _entries.append(_e)
+                    if _entries:
+                        _lines = [_tg_photo_confirmation_text(_e2)
+                                  for _e2 in _entries]
+                        _head = ""
+                        if len(_entries) > 1:
+                            _head = ("\u05e0\u05e8\u05e9\u05de\u05d5 %d \u05d0\u05d9\u05de\u05d5\u05e0\u05d9\u05dd:\n"
+                                     % len(_entries))
+                        telegram_send(_head + "\n".join(_lines), cid)
+                    else:
+                        telegram_send(
+                            "\u274c \u05e9\u05de\u05d9\u05e8\u05ea \u05d4\u05e8\u05d9\u05e9\u05d5\u05dd \u05e0\u05db\u05e9\u05dc\u05d4.", cid)
+                    continue
+                if "text" not in msg:
+                    continue
                 text = msg["text"].strip()
                 if not text:
                     continue
@@ -8492,6 +12922,127 @@ class App:
                     pass
 
     def _wake_loop(self):
+        # v4.70: Vosk streaming wake detection (replaces the Whisper wake path).
+        # A small en-us model with a fixed grammar recognizes the wake word
+        # reliably and near-instantly, with essentially no hallucinated
+        # false-fires. The model is loaded once and cached locally.
+        try:
+            import queue as _queue
+            from vosk import Model as _VoskModel, KaldiRecognizer as _KaldiRec
+        except Exception as e:
+            # v4.74: Vosk unavailable -> DON'T leave the orb un-poppable. Fall
+            # back to the Whisper wake engine (the proven v4.67 path) so saying
+            # the wake word still pops the orb. Before this fix a missing Vosk
+            # install returned here and the orb, hidden after boot, could never
+            # reappear on wake -> the reported "floating orb never appears when
+            # invoked". self.wake_model (Whisper "tiny") is already loaded at boot.
+            print("[diag] Vosk import failed, falling back to Whisper wake:",
+                  repr(e), flush=True)
+            try:
+                self._push("System", "Using Whisper wake engine, sir.")
+            except Exception:
+                pass
+            self._wake_loop_whisper()
+            return
+        try:
+            _vmodel = _VoskModel(lang="en-us")
+        except Exception as e:
+            # v4.74: same fallback if the Vosk model can't be downloaded/loaded,
+            # so activation (and therefore the orb) never silently dies.
+            print("[diag] Vosk model load failed, falling back to Whisper wake:",
+                  repr(e), flush=True)
+            try:
+                self._push("System", "Using Whisper wake engine, sir.")
+            except Exception:
+                pass
+            self._wake_loop_whisper()
+            return
+        _GRAMMAR = '["achilles", "hey achilles", "[unk]"]'
+        pre_len = int(SAMPLE_RATE * PREROLL_SEC)
+        blk = int(SAMPLE_RATE * 0.15)
+        print("[wake] Vosk wake engine ready (say 'Achilles').", flush=True)
+
+        while not self.stop:
+            if not self.wake_on or self.busy:
+                time.sleep(0.2)
+                continue
+            rec = _KaldiRec(_vmodel, SAMPLE_RATE, _GRAMMAR)
+            rec.SetWords(True)
+            q = _queue.Queue()
+            pre = {"buf": np.zeros(pre_len, dtype=np.float32)}
+
+            def cb(indata, frames, t_info, status, _q=q, _pre=pre):
+                x = indata[:, 0]
+                _q.put((np.clip(x, -1.0, 1.0) * 32767.0).astype(np.int16).tobytes())
+                n = len(x)
+                b = _pre["buf"]
+                b = np.roll(b, -n)
+                b[-n:] = x
+                _pre["buf"] = b
+
+            triggered = False
+            try:
+                with sd.InputStream(samplerate=SAMPLE_RATE, channels=1,
+                                    dtype='float32', blocksize=blk, callback=cb):
+                    while not self.stop and self.wake_on and not self.busy:
+                        try:
+                            data = q.get(timeout=0.3)
+                        except _queue.Empty:
+                            continue
+                        hit = False
+                        if rec.AcceptWaveform(data):
+                            # v4.73: fire ONLY on a finalized segment that is
+                            # cleanly the wake word - "achilles" present, NO
+                            # out-of-vocabulary "[unk]" token mixed in, and
+                            # short. Background video/music decodes as runs of
+                            # "[unk]", so this rejects the false-fire storm.
+                            _res = json.loads(rec.Result())
+                            _txt = _res.get("text", "").strip()
+                            _toks = _txt.split()
+                            hit = ("achilles" in _toks and "[unk]" not in _toks
+                                   and 1 <= len(_toks) <= 6)
+                            if _txt:
+                                _cf = [w.get("conf", 1.0)
+                                       for w in _res.get("result", [])
+                                       if w.get("word") == "achilles"]
+                                _mc = min(_cf) if _cf else 1.0
+                                try:
+                                    with open("wake_diag.log", "a", encoding="utf-8") as _wf:
+                                        _wf.write("[heard] vosk final=%r conf=%.2f wake=%s\n"
+                                                  % (_txt, _mc, hit))
+                                except Exception:
+                                    pass
+                        # partials are intentionally ignored now (they
+                        # fluctuate and caused constant false triggers).
+                        if hit:
+                            triggered = True
+                            self._preroll = pre["buf"].copy()
+                            break
+            except Exception as e:
+                print("[diag] wake-loop mic reopen failed, retrying:", repr(e), flush=True)
+                try:
+                    self._push("System", "Microphone unavailable - retrying. "
+                               "Close other apps using the mic, sir.")
+                except Exception:
+                    pass
+                time.sleep(0.6)
+            if triggered:
+                try:
+                    with open("wake_diag.log", "a", encoding="utf-8") as _wf:
+                        _wf.write("[trigger] firing _turn\n")
+                except Exception:
+                    pass
+                self._push("System", "Wake word detected.")
+                self._face_req()
+                self._turn(True, collapse_after=True)
+                time.sleep(0.6)
+
+    def _wake_loop_whisper(self):
+        # v4.74: Whisper-based wake fallback (the v4.67 engine), used when Vosk
+        # is not installed or its model can't load. Uses the already-loaded
+        # self.wake_model ("tiny") + WAKE_GATE + detect_wake(); on a hit it pops
+        # the orb via _face_req() and runs one turn, exactly like the Vosk path.
+        print("[wake] Whisper wake engine ready (say the wake word).", flush=True)
         ring_len = int(SAMPLE_RATE * WAKE_WINDOW)
         block = int(SAMPLE_RATE * 0.1)
         while not self.stop:
@@ -8524,38 +13075,29 @@ class App:
                                 text = transcribe_wake(self.wake_model, "wake_window.wav")
                             except Exception:
                                 text = ""
-                            # v4.67: fire whenever a wake word is clearly present.
-                            # The old "<= 4 words" cap silently rejected valid
-                            # wakes when the tiny model expanded the clip into a
-                            # short phrase ("hey jarvis are you there"); the more
-                            # generous <= 8 cap still rejects long hallucinated
-                            # runs of speech that merely happen to contain a name.
                             _hit = (bool(text) and detect_wake(text)
                                     and len(text.split()) <= 8)
                             if text:
                                 try:
                                     with open("wake_diag.log", "a", encoding="utf-8") as _wf:
-                                        _wf.write("[heard] %r match=%s\n" % (text, _hit))
+                                        _wf.write("[heard] whisper %r match=%s\n" % (text, _hit))
                                 except Exception:
                                     pass
                             if _hit:
                                 triggered = True
-                                # grab the tail of the ring buffer as pre-roll,
-                                # so the first command word (already spoken in
-                                # the same breath) isn't lost.
+                                # tail of the ring as pre-roll so the first
+                                # command word (same breath) isn't lost.
                                 with lock:
                                     tail = ring["buf"][-int(SAMPLE_RATE * PREROLL_SEC):].copy()
                                 self._preroll = tail
                                 break
                         time.sleep(WAKE_STEP)
             except Exception as e:
-                # The mic device may briefly be busy (just released by a
-                # conversation). Print it so a real problem is visible, then
-                # back off and retry rather than dying quietly.
-                print("[diag] wake-loop mic reopen failed, retrying:", repr(e), flush=True)
-                # v4.67: also surface it - a console-less GUI hides print(), so
-                # without this the wake path can be dead while looking like
-                # "just not hearing me".
+                # Mic may be briefly busy (just released by a conversation).
+                # Surface it (a console-less GUI hides print()) then back off and
+                # retry instead of dying quietly.
+                print("[diag] whisper wake-loop mic reopen failed, retrying:",
+                      repr(e), flush=True)
                 try:
                     self._push("System", "Microphone unavailable - retrying. "
                                "Close other apps using the mic, sir.")
@@ -8565,16 +13107,15 @@ class App:
             if triggered:
                 try:
                     with open("wake_diag.log", "a", encoding="utf-8") as _wf:
-                        _wf.write("[trigger] firing _turn\n")
+                        _wf.write("[trigger] firing _turn (whisper)\n")
                 except Exception:
                     pass
                 self._push("System", "Wake word detected.")
                 self._face_req()
                 self._turn(True, collapse_after=True)
-                # Settle: the conversation just released the mic. Give Windows a
-                # moment to free the audio device before we re-open it for wake
-                # detection. Without this, the next InputStream open could fail
-                # and JARVIS would silently stop hearing "Hey JARVIS".
+                # Settle: give the OS a moment to free the audio device before we
+                # re-open it, or the next InputStream open can fail and the wake
+                # path goes silently deaf.
                 time.sleep(0.6)
 
     # ---- Pillow renderer ----
@@ -8582,7 +13123,10 @@ class App:
     def _bh_build_async(self):
         """Pre-render the black-hole layers off the UI thread."""
         try:
-            self._bh_make_layers(520)
+            # v5.17a: 760 measured as the sweet spot - +46% linear resolution
+            # and double the baked frames for ~1.3x the per-frame cost of the
+            # old 520 (1024 measured ~1.9x and would drop the frame rate).
+            self._bh_make_layers(760)
             print("[face] black-hole layers ready", flush=True)
         except Exception as e:
             print("[diag] black-hole prerender failed, keeping orb:", repr(e),
@@ -8590,7 +13134,7 @@ class App:
 
     def _bh_make_layers(self, S):
         """Build all static/animated layers once with numpy + PIL."""
-        NF = 24
+        NF = 48  # v5.17a: halves the angular gap the cross-fade must hide
         ax = np.linspace(-1.0, 1.0, S, dtype=np.float32)
         x, y = np.meshgrid(ax, ax)
         yd = y / 0.26                      # squash = camera tilt over the disk
@@ -8633,7 +13177,7 @@ class App:
 
             def with_glow(im):
                 try:
-                    g = im.filter(ImageFilter.GaussianBlur(8))
+                    g = im.filter(ImageFilter.GaussianBlur(12))  # v5.17a: scaled with S
                     g.alpha_composite(im)
                     return g
                 except Exception:
@@ -8667,9 +13211,15 @@ class App:
         stars = to_img(np.full_like(rc, 0.004), np.full_like(rc, 0.004),
                        np.full_like(rc, 0.008), edge)
 
+        # v5.17a: arc/shadow/ring are static and composited consecutively
+        # every tick - bake them into ONE "mid" layer once, saving two
+        # full-size composites per frame. Old keys kept for compatibility.
+        mid = arc.copy()
+        mid.alpha_composite(shadow)
+        mid.alpha_composite(ring_img)
         self._bhL = {"S": S, "NF": NF, "stars": stars, "front": fronts,
                      "back": backs, "arc": arc, "ring": ring_img,
-                     "shadow": shadow}
+                     "shadow": shadow, "mid": mid}
 
     def _render_bh(self, Wc, Hc, st, now):
         """The black hole IS the orb now: same window, same states, new
@@ -8689,7 +13239,9 @@ class App:
             spd, boost = 1.0, (0.55 if st == "loading" else 1.0)
         # v4.62: very slow majestic spin (~45s/rev at idle) + cross-fade
         # between adjacent baked frames -> perfectly SMOOTH at any speed.
-        self._bh_ph = (self._bh_ph + 0.045 * spd) % L["NF"]
+        # v5.17a: 0.090 with NF=48 is the same angular speed 0.045 gave at
+        # NF=24 - the spin FEELS identical, only smoother.
+        self._bh_ph = (self._bh_ph + 0.090 * spd) % L["NF"]
         i = int(self._bh_ph)
         j = (i + 1) % L["NF"]
         f = self._bh_ph - i
@@ -8701,9 +13253,10 @@ class App:
 
         img = L["stars"].copy()
         img.alpha_composite(back)
-        img.alpha_composite(L["arc"])
-        img.alpha_composite(L["shadow"])
-        img.alpha_composite(L["ring"])
+        img.alpha_composite(L.get("mid") or L["arc"])  # v5.17a: pre-baked mid
+        if "mid" not in L:
+            img.alpha_composite(L["shadow"])
+            img.alpha_composite(L["ring"])
         img.alpha_composite(front)
         dr = ImageDraw.Draw(img)
 
@@ -8713,7 +13266,7 @@ class App:
             px = S / 2.0 + np.cos(self._bh_star_a) * S * 0.30
             py = S / 2.0 + np.sin(self._bh_star_a) * S * 0.10 - S * 0.05
             gg = 0.7 + 0.3 * np.sin(now / 110.0)
-            for rad, alp in ((9.0, 60), (5.0, 130), (2.4, 255)):
+            for rad, alp in ((13.2, 60), (7.3, 130), (3.5, 255)):  # v5.17a: x S/520
                 dr.ellipse([px - rad, py - rad, px + rad, py + rad],
                            fill=(int(160 + 60 * gg), int(200 + 40 * gg), 255,
                                  int(alp * gg)))
@@ -8734,7 +13287,7 @@ class App:
                 rr = self.ripple * S * 0.62
                 aa = int(max(0, (1 - self.ripple) * 180))
                 dr.ellipse([S / 2 - rr, S / 2 - rr, S / 2 + rr, S / 2 + rr],
-                           outline=(255, 150, 70, aa), width=2)
+                           outline=(255, 150, 70, aa), width=3)  # v5.17a: x S/520
 
         D = max(2, int(min(Wc, Hc) * 0.97))
         img = img.resize((D, D), Image.LANCZOS)
@@ -8894,12 +13447,16 @@ class App:
 
                 if self.use_pil and Wc > 2 and Hc > 2:
                     try:
-                        self._tkimg = self._render_bh(Wc, Hc, st, now)
+                        self._tkimg = self._render_pil(Wc, Hc, st, now)  # v4.69: orange dot-orb is the base face
                         self.cv.itemconfig(self.img_id, image=self._tkimg)
                         self.cv.coords(self.img_id, 0, 0)
                     except Exception as e:
                         self.use_pil = False
                         print("PIL render failed, fallback:", e)
+                        try:
+                            self._orb_log("PIL render FAILED -> canvas fallback: %r" % (e,))
+                        except Exception:
+                            pass
                 else:
                     self._render_canvas(Wc, Hc, st, now)
 
@@ -8911,6 +13468,10 @@ class App:
                     self.cv.itemconfig(self.status_id, text=self.status_text())
         except Exception as _e:
             print("[diag] animate frame error (continuing):", repr(_e), flush=True)
+            try:
+                self._orb_log("animate FAILED: %r" % (_e,))
+            except Exception:
+                pass
         finally:
             if not self.stop:
                 try:
@@ -9003,6 +13564,13 @@ def main():
         _thr.Thread(target=_wv_autostart, daemon=True).start()
     except Exception as _e:
         print("[diag] worldview autostart not scheduled:", repr(_e))
+    # --- Secure live location sharing: v4.89 LAZY START ----------------
+    # Boot autostart REMOVED on purpose. In v4.85-v4.88 the share server +
+    # Tailscale Funnel calls ran during application startup; a stall there
+    # could take down the whole boot (orb + voice). Now nothing location-
+    # related runs at boot; _ensure_location_sharing() is invoked lazily
+    # inside share_live_location() on first use, so a worst-case hang is
+    # contained to that one voice command.
     # ------------------------------------------------------------------
     root.mainloop()
 
