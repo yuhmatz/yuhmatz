@@ -1,0 +1,8 @@
+# SIMULATED EXPORT — fictional people, invented for training. Not real PII.
+employee_id,full_name,department,email,internal_extension
+1001,Fictional Person A,Engineering,person.a@whitehatlab.local,x1101
+1002,Fictional Person B,Finance,person.b@whitehatlab.local,x1102
+1003,Fictional Person C,Human Resources,person.c@whitehatlab.local,x1103
+1004,Fictional Person D,IT Operations,person.d@whitehatlab.local,x1104
+# REMEDIATION: apply access control to exports, minimise the data they contain,
+# and treat any employee roster as sensitive PII subject to GDPR/CCPA.

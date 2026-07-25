@@ -1,0 +1,30 @@
+{
+  "name": "white-hat-lab",
+  "version": "1.0.0",
+  "private": true,
+  "description": "A completely local, educational cybersecurity lab for learning ethical hacking, practicing on intentionally vulnerable endpoints, and writing professional security reports. For isolated, authorized, local use only.",
+  "type": "commonjs",
+  "main": "backend/server.js",
+  "scripts": {
+    "start": "node backend/server.js",
+    "dev": "node backend/server.js",
+    "scan": "python3 tools/recon_scanner.py http://127.0.0.1:3000"
+  },
+  "keywords": [
+    "security",
+    "education",
+    "ethical-hacking",
+    "penetration-testing",
+    "training",
+    "owasp"
+  ],
+  "license": "MIT",
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "dependencies": {
+    "express": "^4.19.2",
+    "pdfkit": "^0.15.0",
+    "sql.js": "^1.10.3"
+  }
+}

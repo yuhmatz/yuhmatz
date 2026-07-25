@@ -1,0 +1,53 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>White Hat Lab — Ethical Hacking Training</title>
+    <meta
+      name="description"
+      content="A local, educational cybersecurity lab: learn ethical hacking methodology, practice on isolated vulnerable endpoints, and write professional security reports."
+    />
+    <link rel="stylesheet" href="/css/styles.css" />
+    <link
+      rel="icon"
+      href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🛡️</text></svg>"
+    />
+  </head>
+  <body>
+    <!-- Persistent safety banner: the single most important message in the app -->
+    <div id="safety-banner" class="safety-banner">
+      <strong>LOCAL LAB ONLY.</strong> Bound to 127.0.0.1. Only ever test systems
+      you own or are explicitly authorized to test. Everything here is simulated
+      for education.
+    </div>
+
+    <div class="app-shell">
+      <!-- Sidebar navigation -->
+      <aside class="sidebar">
+        <div class="brand">
+          <span class="brand-logo">🛡️</span>
+          <div>
+            <div class="brand-name">White Hat Lab</div>
+            <div class="brand-tag">Ethical Hacking Trainer</div>
+          </div>
+        </div>
+
+        <nav class="nav" id="nav"><!-- links injected by app.js --></nav>
+
+        <div class="sidebar-footer">
+          <div class="status-dot" id="server-status">
+            <span class="dot"></span><span id="server-status-text">checking…</span>
+          </div>
+          <p class="sidebar-note">Educational use · No harm · Local scope</p>
+        </div>
+      </aside>
+
+      <!-- Main content — swapped by the hash router -->
+      <main class="content" id="view"><!-- views injected here --></main>
+    </div>
+
+    <!-- App is split into small ES modules for readability & extensibility -->
+    <script type="module" src="/js/app.js"></script>
+  </body>
+</html>
