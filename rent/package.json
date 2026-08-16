@@ -1,0 +1,15 @@
+{
+  "name": "rent-collection",
+  "version": "1.0.0",
+  "private": true,
+  "description": "מערכת לניהול וגביית שכר דירה – חוזים, חיובים חודשיים, תשלומים בפועל וחיפוש בחוזים",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "test": "node --test \"test/*.test.js\""
+  },
+  "engines": {
+    "node": ">=22.5.0"
+  },
+  "dependencies": {}
+}

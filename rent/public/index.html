@@ -1,0 +1,41 @@
+<!doctype html>
+<html lang="he" dir="rtl">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>גביית שכר דירה</title>
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🏠</text></svg>">
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+  <div id="login" class="login-wrap hidden">
+    <form class="card" style="width:min(360px,100%)" id="login-form">
+      <h2>כניסה למערכת</h2>
+      <div class="field">
+        <label for="passcode">קוד כניסה</label>
+        <input id="passcode" type="password" autocomplete="current-password" autofocus>
+      </div>
+      <button class="btn primary" type="submit" style="width:100%">כניסה</button>
+    </form>
+  </div>
+
+  <div id="app" class="hidden">
+    <header class="topbar no-print">
+      <div class="topbar-inner">
+        <div class="brand"><span class="dot"></span> גביית שכר דירה</div>
+        <nav class="tabs" id="tabs"></nav>
+        <div class="toolbar">
+          <input type="month" id="global-period" style="width:auto" title="חודש עבודה">
+          <button class="theme-toggle" id="theme-toggle" data-act="theme" title="מצב כהה / בהיר">☀</button>
+        </div>
+      </div>
+    </header>
+    <main id="view"></main>
+  </div>
+
+  <div id="modal-host"></div>
+  <div id="toasts"></div>
+
+  <script src="/app.js"></script>
+</body>
+</html>
