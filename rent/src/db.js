@@ -120,6 +120,17 @@ CREATE TABLE IF NOT EXISTS allocations (
 CREATE INDEX IF NOT EXISTS idx_alloc_payment ON allocations(payment_id);
 CREATE INDEX IF NOT EXISTS idx_alloc_period ON allocations(period);
 
+-- סימון "הודיע/הבטיח לשלם" לחודש מסוים – דייר שמאחר אך יצר קשר
+CREATE TABLE IF NOT EXISTS notices (
+  id            INTEGER PRIMARY KEY AUTOINCREMENT,
+  contract_id   INTEGER NOT NULL REFERENCES contracts(id) ON DELETE CASCADE,
+  period        TEXT NOT NULL,
+  note          TEXT NOT NULL DEFAULT '',
+  promised_date TEXT,
+  created_at    TEXT NOT NULL
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_notices_unique ON notices(contract_id, period);
+
 CREATE TABLE IF NOT EXISTS settings (
   key   TEXT PRIMARY KEY,
   value TEXT NOT NULL

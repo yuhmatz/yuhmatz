@@ -1,4 +1,39 @@
 :root {
+  /* ערכת צבעים כהה – רקע שחור, כיתוב לבן */
+  --bg: #000000;
+  --surface: #0e0e11;
+  --surface-2: #17171c;
+  --border: #26262e;
+  --border-strong: #3b3b46;
+  --text: #ffffff;
+  --muted: #a3a3ad;
+
+  /* ירוק = שמות ותשלומים שהתקבלו */
+  --name: #4ade80;
+  --accent: #16a34a;
+  --accent-soft: #10321d;
+  --accent-text: #86efac;
+  --ok: #22c55e;
+  --ok-soft: #0f2e1b;
+
+  /* כתום = מאחר אבל הודיע */
+  --warn: #fb923c;
+  --warn-soft: #3a2308;
+
+  /* אדום = חוב בפיגור */
+  --danger: #f87171;
+  --danger-soft: #3d1416;
+
+  /* כחול = צ׳ק שממתין לפירעון */
+  --info: #60a5fa;
+  --info-soft: #12233f;
+
+  --shadow: 0 1px 2px rgba(0, 0, 0, .6), 0 10px 30px -14px rgba(0, 0, 0, .9);
+  --radius: 12px;
+}
+
+/* מצב בהיר – למי שמעדיף. מתחלף בכפתור שבפינת הכותרת */
+:root[data-theme='light'] {
   --bg: #f4f6fa;
   --surface: #ffffff;
   --surface-2: #f8fafc;
@@ -6,6 +41,7 @@
   --border-strong: #cbd5e1;
   --text: #0f172a;
   --muted: #64748b;
+  --name: #15803d;
   --accent: #0f766e;
   --accent-soft: #ccfbf1;
   --accent-text: #115e59;
@@ -18,31 +54,6 @@
   --info: #1d4ed8;
   --info-soft: #dbeafe;
   --shadow: 0 1px 2px rgba(15, 23, 42, .06), 0 8px 24px -12px rgba(15, 23, 42, .18);
-  --radius: 12px;
-}
-
-@media (prefers-color-scheme: dark) {
-  :root:not([data-theme='light']) {
-    --bg: #0b1120;
-    --surface: #111c33;
-    --surface-2: #16233d;
-    --border: #24344f;
-    --border-strong: #35496b;
-    --text: #e8eefc;
-    --muted: #93a4c0;
-    --accent: #2dd4bf;
-    --accent-soft: #10403c;
-    --accent-text: #99f6e4;
-    --ok: #4ade80;
-    --ok-soft: #13351f;
-    --warn: #fbbf24;
-    --warn-soft: #3b2c07;
-    --danger: #f87171;
-    --danger-soft: #3d1414;
-    --info: #93c5fd;
-    --info-soft: #16294d;
-    --shadow: 0 1px 2px rgba(0, 0, 0, .4), 0 10px 30px -14px rgba(0, 0, 0, .7);
-  }
 }
 
 * { box-sizing: border-box; }
@@ -369,14 +380,12 @@ input[type='checkbox'] { width: auto; }
 .search-box input { font-size: 16px; padding: 11px 14px; }
 
 mark {
-  background: #fde68a;
-  color: #78350f;
+  background: #a16207;
+  color: #fff7ed;
   border-radius: 3px;
   padding: 0 2px;
 }
-@media (prefers-color-scheme: dark) {
-  :root:not([data-theme='light']) mark { background: #a16207; color: #fff7ed; }
-}
+:root[data-theme='light'] mark { background: #fde68a; color: #78350f; }
 
 .snippet {
   background: var(--surface-2);
@@ -440,3 +449,40 @@ mark {
   .card { box-shadow: none; border: 1px solid #ddd; break-inside: avoid; }
   a { text-decoration: none; color: inherit; }
 }
+
+/* ---------- צבעי סטטוס ---------- */
+
+.name { color: var(--name); font-weight: 700; }
+
+.amount-paid { color: var(--ok); }
+.amount-due { color: var(--danger); font-weight: 700; }
+.amount-notified { color: var(--warn); font-weight: 700; }
+.amount-pending { color: var(--info); }
+
+/* פס צבע בצד השורה לפי מצב הגבייה */
+tbody tr[data-state] > td:first-child { border-inline-start: 4px solid transparent; }
+tbody tr[data-state='paid'] > td:first-child { border-inline-start-color: var(--ok); }
+tbody tr[data-state='credit'] > td:first-child { border-inline-start-color: var(--ok); }
+tbody tr[data-state='overdue'] > td:first-child { border-inline-start-color: var(--danger); }
+tbody tr[data-state='notified'] > td:first-child { border-inline-start-color: var(--warn); }
+tbody tr[data-state='pending'] > td:first-child { border-inline-start-color: var(--info); }
+tbody tr[data-state='partial'] > td:first-child { border-inline-start-color: var(--warn); }
+tbody tr[data-state='overdue'] { background: color-mix(in srgb, var(--danger-soft) 45%, transparent); }
+tbody tr[data-state='notified'] { background: color-mix(in srgb, var(--warn-soft) 45%, transparent); }
+
+.theme-toggle {
+  border: 1px solid var(--border-strong);
+  background: transparent;
+  color: var(--muted);
+  border-radius: 999px;
+  width: 34px;
+  height: 34px;
+  cursor: pointer;
+  font-size: 15px;
+  line-height: 1;
+}
+.theme-toggle:hover { background: var(--surface-2); color: var(--text); }
+
+/* שדות תאריך/חודש בדפדפן כהה */
+:root:not([data-theme='light']) input[type='date'],
+:root:not([data-theme='light']) input[type='month'] { color-scheme: dark; }

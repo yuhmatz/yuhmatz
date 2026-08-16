@@ -221,6 +221,10 @@ function contractPeriods(db, contractId, today = U.todayISO()) {
     [contractId],
   );
 
+  const notices = new Map(
+    all(db, 'SELECT period, note, promised_date FROM notices WHERE contract_id = ?', [contractId]).map((n) => [n.period, n]),
+  );
+
   const map = new Map();
   const touch = (period) => {
     if (!map.has(period)) {
@@ -244,10 +248,12 @@ function contractPeriods(db, contractId, today = U.todayISO()) {
   for (const row of out) {
     row.balance = row.charged - row.paid;
     row.label = U.periodLabel(row.period);
+    const notice = notices.get(row.period);
+    row.notice = notice ? { note: notice.note, promised_date: notice.promised_date } : null;
     // סכום שחסר בפועל, אחרי שמנכים צ׳קים/תשלומים שממתינים לפירעון
     const missing = row.balance - row.pending;
     if (row.balance <= 0) row.state = row.charged === 0 && row.paid > 0 ? 'credit' : 'paid';
-    else if (row.due_date < today && missing > 0) row.state = 'overdue';
+    else if (row.due_date < today && missing > 0) row.state = row.notice ? 'notified' : 'overdue';
     else if (row.pending > 0) row.state = 'pending';
     else if (row.paid > 0) row.state = 'partial';
     else row.state = 'open';
@@ -258,14 +264,18 @@ function contractPeriods(db, contractId, today = U.todayISO()) {
 /** סכומי-על לחוזה: סה״כ חויב/שולם/ממתין/יתרה/פיגור/יתרת זכות. */
 function contractSummary(db, contractId, today = U.todayISO()) {
   const periods = contractPeriods(db, contractId, today);
-  const totals = { charged: 0, paid: 0, pending: 0, balance: 0, overdue: 0 };
+  const totals = { charged: 0, paid: 0, pending: 0, balance: 0, overdue: 0, notified: 0 };
   for (const p of periods) {
     totals.charged += p.charged;
     totals.paid += p.paid;
     totals.pending += p.pending;
     totals.balance += p.balance;
     // פיגור = מה שהיה אמור להתקבל, לא התקבל, ואין צ׳ק שממתין לפירעון שמכסה אותו
-    if (p.due_date <= today) totals.overdue += Math.max(0, p.balance - p.pending);
+    if (p.due_date <= today) {
+      const late = Math.max(0, p.balance - p.pending);
+      totals.overdue += late;
+      if (p.notice) totals.notified += late;
+    }
   }
   totals.unallocated = unallocatedTotal(db, contractId);
   return { totals, periods };
@@ -349,7 +359,7 @@ function dashboard(db, period, today = U.todayISO()) {
   );
 
   const rows = [];
-  const totals = { expected: 0, paid: 0, pending: 0, outstanding: 0, overdue_all: 0, credit: 0 };
+  const totals = { expected: 0, paid: 0, pending: 0, outstanding: 0, overdue_all: 0, notified_all: 0, credit: 0 };
 
   for (const raw of contracts) {
     const contract = hydrateContract(raw);
@@ -394,6 +404,7 @@ function dashboard(db, period, today = U.todayISO()) {
     totals.pending += month.pending;
     totals.outstanding += Math.max(0, month.charged - month.paid);
     totals.overdue_all += summary.totals.overdue;
+    totals.notified_all += summary.totals.notified;
     totals.credit += summary.totals.unallocated;
   }
 

@@ -664,6 +664,27 @@ function createRouter(ctx) {
     return get(db, 'SELECT id, filename, extract_status, text FROM contract_files WHERE id = ?', [id]);
   });
 
+  /* --- סימון "הודיע/הבטיח לשלם" --- */
+
+  on('POST', '/api/notices', (_p, _q, body) => {
+    const contractId = refId(db, 'contracts', body.contract_id, { required: true });
+    const period = periodField(body, 'period', { required: true });
+    run(
+      db,
+      `INSERT INTO notices (contract_id, period, note, promised_date, created_at) VALUES (?,?,?,?,?)
+       ON CONFLICT(contract_id, period) DO UPDATE SET note = excluded.note, promised_date = excluded.promised_date`,
+      [contractId, period, str(body, 'note', { max: 500 }), dateField(body, 'promised_date'), U.nowISO()],
+    );
+    return get(db, 'SELECT * FROM notices WHERE contract_id = ? AND period = ?', [contractId, period]);
+  });
+
+  on('DELETE', '/api/notices/:contract_id/:period', (params) => {
+    const contractId = refId(db, 'contracts', params.contract_id, { required: true });
+    const period = periodField(params, 'period', { required: true });
+    run(db, 'DELETE FROM notices WHERE contract_id = ? AND period = ?', [contractId, period]);
+    return { ok: true };
+  });
+
   /* --- חיובים --- */
 
   on('GET', '/api/charges', (_p, query) => {
@@ -804,10 +825,15 @@ function createRouter(ctx) {
     };
   });
 
+  const paymentWithAllocations = (id) => ({
+    ...get(db, 'SELECT * FROM payments WHERE id = ?', [id]),
+    allocations: all(db, 'SELECT period, amount_agorot FROM allocations WHERE payment_id = ? ORDER BY period', [id]),
+  });
+
   on('POST', '/api/payments', (_p, _q, body) =>
     tx(db, () => {
       const id = writePayment(db, null, body, { isNew: true });
-      return get(db, 'SELECT * FROM payments WHERE id = ?', [id]);
+      return paymentWithAllocations(id);
     }),
   );
 
@@ -815,7 +841,7 @@ function createRouter(ctx) {
     tx(db, () => {
       const id = refId(db, 'payments', params.id, { required: true });
       writePayment(db, id, body, { isNew: false });
-      return get(db, 'SELECT * FROM payments WHERE id = ?', [id]);
+      return paymentWithAllocations(id);
     }),
   );
 
@@ -933,6 +959,7 @@ function createRouter(ctx) {
         charges: all(db, 'SELECT * FROM charges'),
         payments: all(db, 'SELECT * FROM payments'),
         allocations: all(db, 'SELECT * FROM allocations'),
+        notices: all(db, 'SELECT * FROM notices'),
         settings: all(db, 'SELECT * FROM settings'),
       },
       null,
@@ -945,7 +972,7 @@ function createRouter(ctx) {
   on('POST', '/api/restore', (_p, _q, body) => {
     const data = body && body.data;
     if (!data || typeof data !== 'object') bad('קובץ גיבוי לא תקין');
-    const tables = ['allocations', 'payments', 'charges', 'contract_files', 'contracts', 'tenants', 'properties', 'settings'];
+    const tables = ['allocations', 'payments', 'notices', 'charges', 'contract_files', 'contracts', 'tenants', 'properties', 'settings'];
     return tx(db, () => {
       for (const t of tables) run(db, `DELETE FROM ${t}`);
       const insertAll = (table, rows) => {
@@ -966,7 +993,7 @@ function createRouter(ctx) {
         return n;
       };
       const counts = {};
-      for (const t of ['properties', 'tenants', 'contracts', 'contract_files', 'charges', 'payments', 'allocations', 'settings']) {
+      for (const t of ['properties', 'tenants', 'contracts', 'contract_files', 'charges', 'payments', 'allocations', 'notices', 'settings']) {
         counts[t] = insertAll(t, data[t]);
       }
       return { ok: true, counts };
@@ -984,7 +1011,7 @@ function createRouter(ctx) {
   on('POST', '/api/reset', (_p, _q, body) => {
     if (body.confirm !== 'מחק הכל') bad('לאישור המחיקה יש לשלוח confirm="מחק הכל"');
     return tx(db, () => {
-      for (const t of ['allocations', 'payments', 'charges', 'contract_files', 'contracts', 'tenants', 'properties']) {
+      for (const t of ['allocations', 'payments', 'notices', 'charges', 'contract_files', 'contracts', 'tenants', 'properties']) {
         run(db, `DELETE FROM ${t}`);
       }
       return { ok: true };

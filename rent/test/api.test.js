@@ -266,3 +266,43 @@ test('מחיקת חוזה מוחקת גם חיובים ותשלומים', () => 
   assert.equal(dbLib.get(db, 'SELECT COUNT(*) AS n FROM payments').n, 0);
   assert.equal(dbLib.get(db, 'SELECT COUNT(*) AS n FROM allocations').n, 0);
 });
+
+test('סימון "הודיע" מפריד בין פיגור שקט לפיגור מדווח', () => {
+  const { call } = setup();
+  const { contract } = baseData(call);
+  const periodOf = (data, p) => data.periods.find((x) => x.period === p);
+
+  assert.equal(periodOf(call('GET', `/api/contracts/${contract.id}`), TWO_AGO).state, 'overdue');
+
+  call('POST', '/api/notices', {}, {
+    contract_id: contract.id,
+    period: TWO_AGO,
+    note: 'יעביר ב-10 לחודש',
+    promised_date: `${THIS_MONTH}-10`,
+  });
+
+  const full = call('GET', `/api/contracts/${contract.id}`);
+  const marked = periodOf(full, TWO_AGO);
+  assert.equal(marked.state, 'notified');
+  assert.equal(marked.notice.note, 'יעביר ב-10 לחודש');
+  assert.equal(full.summary.notified, marked.balance);
+  assert.ok(full.summary.overdue >= full.summary.notified, 'הסכום המדווח נכלל בתוך הפיגור הכולל');
+
+  const dash = call('GET', '/api/dashboard', { period: THIS_MONTH });
+  assert.equal(dash.totals.notified_all, marked.balance);
+
+  call('DELETE', `/api/notices/${contract.id}/${TWO_AGO}`);
+  assert.equal(periodOf(call('GET', `/api/contracts/${contract.id}`), TWO_AGO).state, 'overdue');
+});
+
+test('הסימון נשמר בגיבוי ומשוחזר', () => {
+  const { call } = setup();
+  const { contract } = baseData(call);
+  call('POST', '/api/notices', {}, { contract_id: contract.id, period: TWO_AGO, note: 'הודיע בוואטסאפ' });
+  const backup = JSON.parse(call('GET', '/api/backup').__raw);
+  assert.equal(backup.notices.length, 1);
+  call('POST', '/api/reset', {}, { confirm: 'מחק הכל' });
+  call('POST', '/api/restore', {}, { data: backup });
+  const restored = call('GET', `/api/contracts/${contract.id}`);
+  assert.equal(restored.periods.find((p) => p.period === TWO_AGO).notice.note, 'הודיע בוואטסאפ');
+});

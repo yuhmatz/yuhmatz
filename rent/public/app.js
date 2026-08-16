@@ -241,15 +241,36 @@ function contractOptions(selected) {
 function badgeForState(row) {
   const map = {
     paid: ['ok', 'שולם'],
-    pending: ['warn', 'ממתין לפירעון'],
+    pending: ['info', 'ממתין לפירעון'],
     partial: ['warn', 'שולם חלקית'],
+    notified: ['warn', 'מאחר – הודיע'],
     overdue: ['danger', 'בפיגור'],
     open: ['muted', 'טרם שולם'],
-    credit: ['info', 'יתרת זכות'],
+    credit: ['ok', 'יתרת זכות'],
     none: ['muted', '—'],
   };
   const [cls, label] = map[row.state] || map.none;
-  return `<span class="badge ${cls}">${label}</span>`;
+  const note = row.notice && row.notice.promised_date ? ` (הבטיח ל-${dateHe(row.notice.promised_date)})` : '';
+  const title = row.notice && row.notice.note ? ` title="${esc(row.notice.note)}"` : '';
+  return `<span class="badge ${cls}"${title}>${label}${esc(note)}</span>`;
+}
+
+/** צבע לסכום היתרה: ירוק=אין חוב, כתום=מאחר אך הודיע, אדום=בפיגור */
+function balanceClass(row) {
+  if (!row || row.balance <= 0) return 'amount-paid';
+  if (row.state === 'notified') return 'amount-notified';
+  if (row.state === 'overdue') return 'amount-due';
+  if (row.state === 'pending') return 'amount-pending';
+  return '';
+}
+
+/** כפתור סימון "הודיע" לחודש מסוים */
+function noticeButton(contractId, period, row) {
+  if (!row || row.balance <= 0) return '';
+  if (row.state !== 'overdue' && row.state !== 'notified') return '';
+  return row.notice
+    ? `<button class="btn sm" data-act="toggle-notice" data-id="${contractId}" data-period="${period}" data-on="0">ביטול "הודיע"</button>`
+    : `<button class="btn sm" data-act="toggle-notice" data-id="${contractId}" data-period="${period}" data-on="1">סימון "הודיע"</button>`;
 }
 
 /* ---------- לוח בקרה ---------- */
@@ -265,16 +286,21 @@ async function renderDashboard() {
       const methods = r.methods.length
         ? r.methods.map((m) => `<span class="badge muted">${esc(state.boot.methods[m.method] || m.method)} ${money0(m.total)}</span>`).join(' ')
         : '<span class="muted small">—</span>';
-      return `<tr class="row-click" data-act="open-contract" data-id="${r.contract_id}">
-        <td class="strong">${esc(r.tenant_name)}<div class="sub">${esc(r.property_name)}</div></td>
+      const arrearsCls = r.totals.notified >= r.totals.overdue ? 'warn' : 'danger';
+      return `<tr data-state="${r.active_in_period ? r.month.state : 'none'}">
+        <td class="row-click" data-act="open-contract" data-id="${r.contract_id}">
+          <span class="name">${esc(r.tenant_name)}</span><div class="sub">${esc(r.property_name)}</div></td>
         <td class="num">${money(r.month.charged)}</td>
-        <td class="num">${money(r.month.paid)}</td>
-        <td class="num">${r.month.pending ? money(r.month.pending) : '<span class="muted">—</span>'}</td>
-        <td class="num ${r.month.charged - r.month.paid > 0 ? 'strong' : ''}">${money(r.month.charged - r.month.paid)}</td>
+        <td class="num amount-paid">${money(r.month.paid)}</td>
+        <td class="num amount-pending">${r.month.pending ? money(r.month.pending) : '<span class="muted">—</span>'}</td>
+        <td class="num ${balanceClass(r.month)}">${money(r.month.charged - r.month.paid)}</td>
         <td>${r.active_in_period ? badgeForState(r.month) : `<span class="badge muted">${esc(r.period_note)}</span>`}</td>
         <td>${methods}</td>
-        <td class="num">${r.totals.overdue > 0 ? `<span class="badge danger">${money(r.totals.overdue)}</span>` : '<span class="muted">—</span>'}</td>
-        <td class="no-print"><button class="btn sm primary" data-act="new-payment" data-id="${r.contract_id}" data-period="${data.period}">רישום תשלום</button></td>
+        <td class="num">${r.totals.overdue > 0 ? `<span class="badge ${arrearsCls}">${money(r.totals.overdue)}</span>` : '<span class="muted">—</span>'}</td>
+        <td class="no-print nowrap">
+          <button class="btn sm primary" data-act="new-payment" data-id="${r.contract_id}" data-period="${data.period}">רישום תשלום</button>
+          ${noticeButton(r.contract_id, data.period, r.active_in_period ? r.month : null)}
+        </td>
       </tr>`;
     })
     .join('');
@@ -282,7 +308,7 @@ async function renderDashboard() {
   const checks = data.checks
     .map(
       (c) => `<tr>
-        <td>${esc(c.tenant_name || '')}</td>
+        <td><span class="name">${esc(c.tenant_name || '')}</span></td>
         <td class="num">${money(c.amount_agorot)}</td>
         <td>${esc(c.check_number || '')}</td>
         <td>${esc(c.bank || '')}</td>
@@ -312,10 +338,16 @@ async function renderDashboard() {
       <div class="kpi"><div class="label">נגבה בפועל</div><div class="value ok">${money0(t.paid)}</div></div>
       <div class="kpi"><div class="label">ממתין לפירעון (צ׳קים)</div><div class="value warn">${money0(t.pending)}</div></div>
       <div class="kpi"><div class="label">חוב פתוח לחודש</div><div class="value ${t.outstanding > 0 ? 'danger' : 'ok'}">${money0(t.outstanding)}</div></div>
-      <div class="kpi"><div class="label">פיגור מצטבר</div><div class="value ${t.overdue_all > 0 ? 'danger' : 'ok'}">${money0(t.overdue_all)}</div>
+      <div class="kpi"><div class="label">פיגור ללא הודעה</div><div class="value ${t.overdue_all - t.notified_all > 0 ? 'danger' : 'ok'}">${money0(t.overdue_all - t.notified_all)}</div>
         <div class="hint">כולל חודשים קודמים</div></div>
-      <div class="kpi"><div class="label">יתרות זכות</div><div class="value">${money0(t.credit)}</div>
-        <div class="hint">תשלומים שטרם שויכו לחודש</div></div>
+      <div class="kpi"><div class="label">מאחרים שהודיעו</div><div class="value warn">${money0(t.notified_all)}</div>
+        <div class="hint">סומנו כ״הודיע/הבטיח לשלם״</div></div>
+      ${
+        t.credit > 0
+          ? `<div class="kpi"><div class="label">יתרות זכות</div><div class="value ok">${money0(t.credit)}</div>
+              <div class="hint">תשלומים שטרם שויכו לחודש</div></div>`
+          : ''
+      }
     </div>
 
     <div class="card">
@@ -354,7 +386,7 @@ async function renderContracts() {
   const rows = list
     .map(
       (c) => `<tr class="row-click" data-act="open-contract" data-id="${c.id}">
-        <td class="strong">${esc(c.tenant_name || 'ללא דייר')}</td>
+        <td><span class="name">${esc(c.tenant_name || 'ללא דייר')}</span></td>
         <td>${esc(c.property_name || '')}<div class="sub">${esc(c.property_address || '')}</div></td>
         <td class="num">${money(c.rent_agorot)}</td>
         <td class="nowrap">${esc(state.boot.methods[c.default_method])}</td>
@@ -385,15 +417,20 @@ async function renderContract() {
 
   const periods = c.periods
     .map(
-      (p) => `<tr>
+      (p) => `<tr data-state="${p.state}">
         <td class="strong">${esc(p.label)}</td>
         <td class="num">${dateHe(p.due_date)}</td>
         <td class="num">${money(p.charged)}</td>
-        <td class="num">${money(p.paid)}</td>
-        <td class="num">${p.pending ? money(p.pending) : '<span class="muted">—</span>'}</td>
-        <td class="num strong">${money(p.balance)}</td>
+        <td class="num amount-paid">${money(p.paid)}</td>
+        <td class="num amount-pending">${p.pending ? money(p.pending) : '<span class="muted">—</span>'}</td>
+        <td class="num strong ${balanceClass(p)}">${money(p.balance)}</td>
         <td>${badgeForState(p)}</td>
-        <td class="no-print">${p.balance > 0 ? `<button class="btn sm" data-act="new-payment" data-id="${c.id}" data-period="${p.period}" data-amount="${p.balance}">רישום תשלום</button>` : ''}</td>
+        <td class="no-print nowrap">${
+          p.balance > 0
+            ? `<button class="btn sm" data-act="new-payment" data-id="${c.id}" data-period="${p.period}" data-amount="${p.balance}">רישום תשלום</button>
+               ${noticeButton(c.id, p.period, p)}`
+            : ''
+        }</td>
       </tr>`,
     )
     .reverse()
@@ -439,7 +476,7 @@ async function renderContract() {
   el('view').innerHTML = `
     <div class="page-head">
       <button class="btn ghost no-print" data-act="go-contracts">‹ חזרה לחוזים</button>
-      <h1>${esc(c.tenant_name || 'ללא דייר')} · ${esc(c.property_name || c.property_address || 'נכס')}</h1>
+      <h1><span class="name">${esc(c.tenant_name || 'ללא דייר')}</span> · ${esc(c.property_name || c.property_address || 'נכס')}</h1>
       <div class="toolbar no-print">
         <button class="btn primary" data-act="new-payment" data-id="${c.id}">+ רישום תשלום</button>
         <button class="btn" data-act="new-charge" data-id="${c.id}">+ חיוב נוסף</button>
@@ -555,7 +592,7 @@ function paymentRow(p, { showTenant }) {
     ? p.allocations.map((a) => `<span class="badge muted">${esc(periodLabel(a.period))} · ${money0(a.amount_agorot)}</span>`).join(' ')
     : '<span class="badge info">לא שויך</span>';
   return `<tr>
-    ${showTenant ? `<td class="strong">${esc(p.tenant_name || '')}<div class="sub">${esc(p.property_name || '')}</div></td>` : ''}
+    ${showTenant ? `<td><span class="name">${esc(p.tenant_name || '')}</span><div class="sub">${esc(p.property_name || '')}</div></td>` : ''}
     <td class="num nowrap">${dateHe(p.paid_date)}</td>
     <td class="num strong">${money(p.amount_agorot)}</td>
     <td class="nowrap">${esc(state.boot.methods[p.method] || p.method)}</td>
@@ -628,7 +665,7 @@ async function renderChecks() {
         rows
           .map(
             (p) => `<tr>
-              <td class="strong">${esc(p.tenant_name || '')}</td>
+              <td><span class="name">${esc(p.tenant_name || '')}</span></td>
               <td>${esc(p.check_number || '—')}</td>
               <td class="small">${esc([p.bank, p.branch, p.account].filter(Boolean).join(' / ') || '—')}</td>
               <td class="num">${money(p.amount_agorot)}</td>
@@ -728,7 +765,7 @@ async function renderTenants() {
         list
           .map(
             (t) => `<tr>
-              <td class="strong">${esc(t.name)}</td><td class="nowrap">${esc(t.phone)}</td><td>${esc(t.email)}</td>
+              <td><span class="name">${esc(t.name)}</span></td><td class="nowrap">${esc(t.phone)}</td><td>${esc(t.email)}</td>
               <td class="mono">${esc(t.national_id)}</td><td class="small">${esc(t.notes)}</td>
               <td class="no-print nowrap">
                 <button class="btn sm" data-act="edit-tenant" data-id="${t.id}">עריכה</button>
@@ -862,7 +899,8 @@ function tenantForm(t = {}) {
     onSubmit: async (v) => {
       await api(t.id ? `/api/tenants/${t.id}` : '/api/tenants', { method: t.id ? 'PUT' : 'POST', body: v });
       toast('נשמר', 'ok');
-      await boot();
+      await loadBootData();
+      await render();
     },
   });
 }
@@ -880,7 +918,8 @@ function propertyForm(p = {}) {
     onSubmit: async (v) => {
       await api(p.id ? `/api/properties/${p.id}` : '/api/properties', { method: p.id ? 'PUT' : 'POST', body: v });
       toast('נשמר', 'ok');
-      await boot();
+      await loadBootData();
+      await render();
     },
   });
 }
@@ -1012,8 +1051,12 @@ async function paymentForm(payment = {}, defaults = {}) {
         body.auto_allocate = false;
         body.allocations = [];
       } else body.period = v.period_choice;
-      await api(payment.id ? `/api/payments/${payment.id}` : '/api/payments', { method: payment.id ? 'PUT' : 'POST', body });
-      toast('התשלום נשמר', 'ok');
+      const saved = await api(payment.id ? `/api/payments/${payment.id}` : '/api/payments', {
+        method: payment.id ? 'PUT' : 'POST',
+        body,
+      });
+      const allocated = (saved.allocations || []).map((a) => `${periodLabel(a.period)} · ${money(a.amount_agorot)}`).join(' | ');
+      toast(allocated ? `התשלום נשמר ושויך ל: ${allocated}` : 'התשלום נשמר ללא שיוך לחודש (יתרת זכות)', 'ok');
       await render();
     },
   });
@@ -1057,6 +1100,22 @@ async function paymentForm(payment = {}, defaults = {}) {
       paymentForm({}, { contract_id: Number(reload.value) });
     });
   }
+}
+
+/** סימון חודש כ"הדייר מאחר אבל הודיע" – מוצג בכתום */
+function noticeForm(contractId, period) {
+  openModal({
+    title: `סימון "הודיע" – ${periodLabel(period)}`,
+    submitLabel: 'סימון',
+    body: `${field('מה נמסר?', input('note', '', 'placeholder="למשל: יעביר ב-10 לחודש, עיכוב במשכורת"'))}
+      ${field('הבטיח לשלם עד', input('promised_date', '', 'type="date"'))}
+      <div class="help">החודש יסומן בכתום במקום באדום, ויוצג בנפרד מהפיגורים שאין עליהם הודעה.</div>`,
+    onSubmit: async (v) => {
+      await api('/api/notices', { method: 'POST', body: { contract_id: contractId, period, note: v.note, promised_date: v.promised_date } });
+      toast('סומן', 'ok');
+      await render();
+    },
+  });
 }
 
 function chargeForm(contractId, charge = {}) {
@@ -1218,9 +1277,12 @@ document.addEventListener('click', async (event) => {
       case 'new-tenant':
         tenantForm();
         break;
-      case 'edit-tenant':
-        tenantForm(state.boot.tenants.find((t) => t.id === id));
+      case 'edit-tenant': {
+        const tenant = (await api('/api/tenants')).find((t) => t.id === id);
+        if (!tenant) throw new Error('הדייר לא נמצא – רענן את הדף');
+        tenantForm(tenant);
         break;
+      }
       case 'delete-tenant':
         if (!confirm('למחוק את הדייר?')) return;
         await api(`/api/tenants/${id}`, { method: 'DELETE' });
@@ -1230,9 +1292,12 @@ document.addEventListener('click', async (event) => {
       case 'new-property':
         propertyForm();
         break;
-      case 'edit-property':
-        propertyForm(state.boot.properties.find((p) => p.id === id));
+      case 'edit-property': {
+        const property = (await api('/api/properties')).find((p) => p.id === id);
+        if (!property) throw new Error('הנכס לא נמצא – רענן את הדף');
+        propertyForm(property);
         break;
+      }
       case 'delete-property':
         if (!confirm('למחוק את הנכס?')) return;
         await api(`/api/properties/${id}`, { method: 'DELETE' });
@@ -1263,6 +1328,20 @@ document.addEventListener('click', async (event) => {
         await api(`/api/payments/${id}`, { method: 'PUT', body: await paymentPatch(id, node.dataset.status) });
         toast(node.dataset.status === 'paid' ? 'סומן כנפרע' : 'סומן כצ׳ק שחזר', 'ok');
         await render();
+        break;
+      case 'toggle-notice': {
+        const period = node.dataset.period;
+        if (node.dataset.on === '1') {
+          noticeForm(id, period);
+        } else {
+          await api(`/api/notices/${id}/${period}`, { method: 'DELETE' });
+          toast('הסימון בוטל', 'ok');
+          await render();
+        }
+        break;
+      }
+      case 'theme':
+        setTheme(document.documentElement.dataset.theme === 'light' ? 'dark' : 'light');
         break;
       case 'new-charge':
         chargeForm(id);
@@ -1384,6 +1463,17 @@ document.addEventListener('keydown', (event) => {
   if (event.key === 'Escape') closeModal();
 });
 
+function setTheme(theme) {
+  document.documentElement.dataset.theme = theme === 'light' ? 'light' : 'dark';
+  try {
+    localStorage.setItem('rent_theme', document.documentElement.dataset.theme);
+  } catch {
+    /* דפדפן ללא אחסון מקומי */
+  }
+  const button = el('theme-toggle');
+  if (button) button.textContent = document.documentElement.dataset.theme === 'light' ? '🌙' : '☀';
+}
+
 function showLogin() {
   el('app').classList.add('hidden');
   el('login').classList.remove('hidden');
@@ -1392,6 +1482,13 @@ function showLogin() {
 /* ---------- אתחול ---------- */
 
 async function boot() {
+  let saved = 'dark';
+  try {
+    saved = localStorage.getItem('rent_theme') || 'dark';
+  } catch {
+    /* דפדפן ללא אחסון מקומי */
+  }
+  setTheme(saved);
   const auth = await fetch('/api/auth').then((r) => r.json());
   if (auth.required && !auth.authorized) {
     showLogin();
