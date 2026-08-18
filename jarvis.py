@@ -1,7 +1,7 @@
 """
 JARVIS v3.0 — voice assistant: bilingual, web search, tools, red-orange orb
 ============================================================================
-(Version is updated by hand on each change. Current: v4.67 — 30 Jun 2026.)
+(Version is updated by hand on each change. Current: v4.68 — 18 Aug 2026.)
 
 What works now:
   * Wake word "Hey JARVIS" (continuous background listening); empty screen until
@@ -21,6 +21,37 @@ What works now:
     runs cleanly when launched from start_jarvis.bat (double-click).
 
 Changelog:
+  v4.68 - RoomScan: the phone camera becomes a 3D room scanner. Say
+          'scan the room' / 'סרוק את החדר' and JARVIS opens a console
+          (roomview.html) showing a QR code; the phone opens
+          roomscan.html and measures the room. Three capture paths,
+          best first: WebXR immersive-ar hit-test (true 6DoF, ~2 cm,
+          Android/Chrome), camera + orientation sensors on any phone
+          (aim the crosshair at each wall-floor corner and tap - the
+          ray from the known phone height meets the floor plane, so
+          each tap is a polar measurement), or typed dimensions. A
+          door-calibration flow solves the phone's height from two
+          shots at a door of known height, removing the biggest bias;
+          each tap averages ~0.4 s of sensor samples and is rejected
+          if the phone was moving; distance and expected error are
+          shown live. Rooms bigger than one viewpoint are handled by
+          moving to a new station and re-shooting two known corners -
+          a 2D Procrustes fit stitches the halves, which also means
+          compass accuracy never matters. A 'square up' pass finds
+          the dominant wall direction and snaps near-right angles,
+          roughly halving the wall error. The result is saved under
+          RoomScans/<room>_<stamp>/ as room.glb (binary glTF written
+          by hand), room.obj/.mtl, a dimensioned plan.svg and
+          scan.json, plus a note in the Obsidian Knowledge/Rooms
+          folder. The scanner is served over TLS on :7779 with a
+          self-signed certificate JARVIS generates itself (browsers
+          only expose the camera and motion sensors in a secure
+          context, and http://192.168.x.x is not one) and is gated by
+          a per-session token carried in the QR link; the console API
+          on :7778 (/roomscan_info, /rooms, /room) is loopback-only.
+          Openings are cut out of the walls properly, so a door is a
+          hole rather than a painted-on rectangle. Tests live in
+          tests/ - run test_roomscan.py and test_roomscan_math.mjs.
   v4.67 - Reliability + safety pass. WAKE: transcribe_wake no longer
           stacks VAD + double no-speech filtering, which on the tiny
           model trimmed a short isolated "Achilles"/"Jarvis" to an empty
@@ -930,6 +961,7 @@ Your current capabilities (what you can ALREADY do — do not suggest these as
 - WorldView: a 3D globe in the browser with live USGS earthquake data, opened via the open_worldview tool when the user asks to open WorldView / open the globe / show worldwide earthquakes (in English or Hebrew).
 - Achilles Core: an ultra-realistic WebGL black-hole screen that is your visual face, with a Solar System mode (clickable planets, facts + live news per planet), a typed command line, and a task list. Opened via the open_achilles tool when the user asks for the black hole, the Achilles screen, the solar system, or the to-do list (Hebrew: 'פתח את החור השחור', 'מערכת השמש', 'תראה לי את המשימות'). Pass scene='solar' for the solar system, scene='todo' for the task list, scene='core' for the black hole.
 - Task list: 'תוסיף משימה X' / 'add task X' adds a task; the list lives in tasks.json and is shown on the Achilles screen.
+- RoomScan: a phone-camera room scanner. open_roomscan puts a QR code on the PC screen; the phone measures the room through its camera + motion sensors (or WebXR AR) and sends back a 3D model (.glb/.obj), a dimensioned floor plan and the room's area, perimeter and ceiling height, all saved under RoomScans/ and noted in Obsidian. roomscan_status reports the last scan. Hebrew triggers: 'סרוק את החדר', 'תמדוד לי את החדר', 'מודל תלת מימד של החדר'.
 - Mission Control: the project roadmap/status dashboard, opened via the open_roadmap tool when the user asks for the roadmap, project status, mission control, or the checklist page (in English or Hebrew).
 - Deep Domain Learning (see CRITICAL rule #1): for a whole field (chemistry/physics/biology/etc.) call deep_learn_domain; for a narrow concept call learn_topic; for status call learning_status; to continue an existing curriculum call resume_learning. Always invoke the tool - never answer learning commands from memory.
 - Knowledge module: when the user explicitly asks you to LEARN, STUDY, RESEARCH, or BUILD KNOWLEDGE on a topic (English: 'learn X', 'study Y', 'research Z'; Hebrew: 'תלמד X', 'ללמוד על Y', 'תחקור Z', 'בנה לי ידע על W'), call the learn_topic tool with the topic. If they mention a project the topic relates to, pass it as context. The tool produces a deep study note saved to the user's Obsidian Knowledge folder; it persists across sessions. After the tool returns, tell the user what was created and offer to read them the TL;DR if they want.
@@ -1995,6 +2027,47 @@ class _FlightsProxyHandler(http.server.BaseHTTPRequestHandler):
                 except Exception:
                     pass
             return
+        # --- RoomScan console API (v4.68) ---------------------------------
+        # Loopback only: /roomscan_info hands out the scanner's session token,
+        # and the phone talks to the TLS listener on :7779 instead.
+        if parsed.path in ("/roomscan_info", "/rooms", "/room"):
+            _peer = self.client_address[0] if self.client_address else ""
+            if _peer not in ("127.0.0.1", "::1", "localhost"):
+                self.send_response(403)
+                self._cors_headers()
+                self.end_headers()
+                return
+            try:
+                if parsed.path == "/roomscan_info":
+                    _info = _start_roomscan_server()
+                    payload = {"url": _info.get("url", ""),
+                               "host": _info.get("host", ""),
+                               "https": bool(_info.get("https")),
+                               "error": _info.get("error", "")}
+                elif parsed.path == "/rooms":
+                    payload = {"scans": _rs_index()}
+                else:
+                    _q = urllib.parse.parse_qs(parsed.query)
+                    _scan = _rs_load((_q.get("id") or [""])[0])
+                    payload = _scan if _scan else {"error": "unknown scan"}
+                body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json; charset=utf-8")
+                self._cors_headers()
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+            except Exception as e:
+                try:
+                    body = ('{"error":' + json.dumps(str(e)) + "}").encode("utf-8")
+                    self.send_response(500)
+                    self.send_header("Content-Type", "application/json")
+                    self._cors_headers()
+                    self.end_headers()
+                    self.wfile.write(body)
+                except Exception:
+                    pass
+            return
         # --- WorldView VESSELS snapshot (v4.66) ----------------------------
         if parsed.path == "/vessels":
             try:
@@ -2644,6 +2717,1221 @@ def open_achilles(scene="core", face=False):
                 "core": "Opening the core, sir."}[scene]
     except Exception as e:
         return "Failed to open the Achilles screen: %s" % e
+
+# --- v4.68: ROOMSCAN - phone camera -> 3D room model -----------------------
+# A room is captured on the phone (roomscan.html, served over HTTPS so the
+# camera and the motion sensors are allowed) and posted here as a small JSON
+# document. Everything below turns that document into real geometry: a floor
+# polygon, walls with door/window cut-outs, a ceiling and optional furniture
+# boxes, exported as .glb (binary glTF), .obj/.mtl, a dimensioned .svg floor
+# plan and an Obsidian note.
+#
+# Scan document (all lengths in metres, angles in degrees):
+#   {
+#     "name":     "Living room",
+#     "ceiling":  2.62,
+#     "floor":    [[x, y], ...],            # >= 3 points, model frame, Z-up
+#     "openings": [{"wall": 0, "type": "door"|"window",
+#                   "u0": 0.4, "u1": 1.3, "z0": 0.0, "z1": 2.05}, ...],
+#     "objects":  [{"label": "sofa", "x": 1.2, "y": 0.4,
+#                   "w": 2.1, "d": 0.9, "h": 0.8, "yaw": 12.0}, ...],
+#     "stations": [{"x": 0, "y": 0, "h": 1.45, "rms": 0.0}, ...],
+#     "meta":     {"mode": "sensor"|"ar"|"manual", "device": "...", ...}
+#   }
+# Wall i runs from floor[i] to floor[i+1] (wrapping); u is measured along that
+# wall from floor[i], z upwards from the floor.
+
+import hmac
+import math
+import secrets
+import shutil
+import socketserver
+import ssl
+import struct
+
+ROOMSCAN_PORT = 7779
+ROOMSCAN_MAX_JSON = 3 * 1024 * 1024      # a scan document is a few KB; be generous
+ROOMSCAN_MAX_PHOTO = 6 * 1024 * 1024     # one reference photo
+ROOMSCAN_MAX_PHOTOS = 60                 # per scan
+ROOMSCAN_MIN_CEILING = 1.5
+ROOMSCAN_MAX_CEILING = 12.0
+ROOMSCAN_MAX_COORD = 200.0               # metres from the origin - sanity bound
+ROOMSCAN_MAX_POINTS = 128
+ROOMSCAN_MAX_OPENINGS = 96
+ROOMSCAN_MAX_OBJECTS = 128
+
+# RE-ENTRANT on purpose: _start_roomscan_server() holds this while it calls
+# _rs_token(), which takes it again. A plain Lock self-deadlocks there.
+_roomscan_lock = threading.RLock()
+_roomscan_started = False
+_roomscan_state = {
+    "https": False,       # True when the scanner is served over TLS
+    "token": "",          # per-session shared secret, carried in the QR URL
+    "url": "",            # full phone URL including the token
+    "host": "",           # LAN IP the phone should reach
+    "error": "",          # last start-up problem, surfaced in the UI
+}
+
+
+# --- storage ---------------------------------------------------------------
+def _rs_root():
+    """Folder holding every scan, next to jarvis.py."""
+    p = Path(__file__).resolve().parent / "RoomScans"
+    p.mkdir(parents=True, exist_ok=True)
+    return p
+
+
+def _rs_slug(name, fallback="room"):
+    """Filesystem-safe folder name. Hebrew is kept (NTFS handles it); path
+    separators, dots and control characters are not."""
+    name = (name or "").strip()
+    name = re.sub(r"[\\/:*?\"<>|\r\n\t]+", " ", name)
+    name = re.sub(r"\s+", "_", name).strip("._ ")
+    name = name[:48]
+    return name or fallback
+
+
+def _rs_scan_dirs():
+    """Every scan folder, newest first."""
+    try:
+        dirs = [p for p in _rs_root().iterdir()
+                if p.is_dir() and (p / "scan.json").exists()]
+    except Exception:
+        return []
+    return sorted(dirs, key=lambda p: p.name, reverse=True)
+
+
+def _rs_load(scan_id):
+    """Load one saved scan by folder name. Returns None if unknown."""
+    safe = _rs_slug(scan_id, "")
+    if not safe:
+        return None
+    d = _rs_root() / safe
+    try:
+        # resolve() + is_relative_to keeps "../.." out of the lookup
+        if not d.resolve().is_relative_to(_rs_root().resolve()):
+            return None
+        with open(d / "scan.json", "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return None
+
+
+# --- validation ------------------------------------------------------------
+def _rs_num(v, lo, hi, default=None):
+    """Coerce to float and clamp, or return default when it isn't a number."""
+    try:
+        f = float(v)
+    except (TypeError, ValueError):
+        return default
+    if f != f or f in (float("inf"), float("-inf")):   # NaN / inf
+        return default
+    return max(lo, min(hi, f))
+
+
+def _rs_validate(raw):
+    """Turn an untrusted POST body into a clean scan document, or raise
+    ValueError with a message the phone can show."""
+    if not isinstance(raw, dict):
+        raise ValueError("scan must be an object")
+
+    pts_in = raw.get("floor")
+    if not isinstance(pts_in, list) or len(pts_in) < 3:
+        raise ValueError("floor needs at least 3 corners")
+    if len(pts_in) > ROOMSCAN_MAX_POINTS:
+        raise ValueError("floor has too many corners (max %d)" % ROOMSCAN_MAX_POINTS)
+    floor = []
+    for p in pts_in:
+        if not isinstance(p, (list, tuple)) or len(p) < 2:
+            raise ValueError("every floor corner must be [x, y]")
+        x = _rs_num(p[0], -ROOMSCAN_MAX_COORD, ROOMSCAN_MAX_COORD)
+        y = _rs_num(p[1], -ROOMSCAN_MAX_COORD, ROOMSCAN_MAX_COORD)
+        if x is None or y is None:
+            raise ValueError("floor corners must be numbers")
+        floor.append([x, y])
+    # drop consecutive duplicates (a double-tap on the same corner)
+    dedup = []
+    for p in floor:
+        if not dedup or math.hypot(p[0] - dedup[-1][0], p[1] - dedup[-1][1]) > 1e-4:
+            dedup.append(p)
+    if len(dedup) >= 4 and math.hypot(dedup[0][0] - dedup[-1][0],
+                                      dedup[0][1] - dedup[-1][1]) <= 1e-4:
+        dedup.pop()          # explicit closing point - the polygon closes itself
+    if len(dedup) < 3:
+        raise ValueError("floor collapsed to fewer than 3 distinct corners")
+    floor = _rs_ensure_ccw(dedup)
+
+    ceiling = _rs_num(raw.get("ceiling"), ROOMSCAN_MIN_CEILING,
+                      ROOMSCAN_MAX_CEILING, 2.6)
+
+    n = len(floor)
+    lens = [_rs_wall_len(floor, i) for i in range(n)]
+    openings = []
+    for o in (raw.get("openings") or [])[:ROOMSCAN_MAX_OPENINGS]:
+        if not isinstance(o, dict):
+            continue
+        w = _rs_num(o.get("wall"), 0, n - 1)
+        if w is None:
+            continue
+        w = int(round(w))
+        L = lens[w]
+        u0 = _rs_num(o.get("u0"), 0.0, L, 0.0)
+        u1 = _rs_num(o.get("u1"), 0.0, L, L)
+        z0 = _rs_num(o.get("z0"), 0.0, ceiling, 0.0)
+        z1 = _rs_num(o.get("z1"), 0.0, ceiling, ceiling)
+        if u1 < u0:
+            u0, u1 = u1, u0
+        if z1 < z0:
+            z0, z1 = z1, z0
+        if (u1 - u0) < 0.02 or (z1 - z0) < 0.02:
+            continue                     # too thin to be a real opening
+        kind = o.get("type")
+        kind = kind if kind in ("door", "window", "opening") else "opening"
+        openings.append({"wall": w, "type": kind,
+                         "u0": u0, "u1": u1, "z0": z0, "z1": z1})
+
+    objects = []
+    for ob in (raw.get("objects") or [])[:ROOMSCAN_MAX_OBJECTS]:
+        if not isinstance(ob, dict):
+            continue
+        x = _rs_num(ob.get("x"), -ROOMSCAN_MAX_COORD, ROOMSCAN_MAX_COORD)
+        y = _rs_num(ob.get("y"), -ROOMSCAN_MAX_COORD, ROOMSCAN_MAX_COORD)
+        w = _rs_num(ob.get("w"), 0.02, 30.0)
+        d = _rs_num(ob.get("d"), 0.02, 30.0)
+        h = _rs_num(ob.get("h"), 0.02, ROOMSCAN_MAX_CEILING)
+        if None in (x, y, w, d, h):
+            continue
+        label = str(ob.get("label") or "object")[:40]
+        objects.append({"label": label, "x": x, "y": y, "w": w, "d": d, "h": h,
+                        "yaw": _rs_num(ob.get("yaw"), -360.0, 360.0, 0.0)})
+
+    stations = []
+    for st in (raw.get("stations") or [])[:64]:
+        if not isinstance(st, dict):
+            continue
+        stations.append({
+            "x": _rs_num(st.get("x"), -ROOMSCAN_MAX_COORD, ROOMSCAN_MAX_COORD, 0.0),
+            "y": _rs_num(st.get("y"), -ROOMSCAN_MAX_COORD, ROOMSCAN_MAX_COORD, 0.0),
+            "h": _rs_num(st.get("h"), 0.1, 3.0, 1.45),
+            "rms": _rs_num(st.get("rms"), 0.0, 100.0, 0.0),
+        })
+
+    meta = raw.get("meta") if isinstance(raw.get("meta"), dict) else {}
+    meta = {str(k)[:32]: str(v)[:200] for k, v in list(meta.items())[:20]}
+
+    return {
+        "name": str(raw.get("name") or "Room")[:60],
+        "ceiling": ceiling,
+        "floor": floor,
+        "openings": openings,
+        "objects": objects,
+        "stations": stations,
+        "meta": meta,
+    }
+
+
+# --- polygon helpers -------------------------------------------------------
+def _rs_poly_area(pts):
+    """Signed area (shoelace). Positive = counter-clockwise seen from above."""
+    a = 0.0
+    n = len(pts)
+    for i in range(n):
+        x0, y0 = pts[i]
+        x1, y1 = pts[(i + 1) % n]
+        a += x0 * y1 - x1 * y0
+    return a / 2.0
+
+
+def _rs_ensure_ccw(pts):
+    """Return the polygon wound counter-clockwise (so 'inside' is on the left
+    of every wall and the floor normal points up)."""
+    return list(pts) if _rs_poly_area(pts) >= 0 else list(reversed(pts))
+
+
+def _rs_poly_perimeter(pts):
+    n = len(pts)
+    return sum(math.hypot(pts[(i + 1) % n][0] - pts[i][0],
+                          pts[(i + 1) % n][1] - pts[i][1]) for i in range(n))
+
+
+def _rs_wall_len(pts, i):
+    n = len(pts)
+    return math.hypot(pts[(i + 1) % n][0] - pts[i][0],
+                      pts[(i + 1) % n][1] - pts[i][1])
+
+
+def _rs_in_tri(p, a, b, c):
+    """Point-in-triangle, edges inclusive (used by the ear test, so a vertex
+    sitting exactly on an edge blocks the ear)."""
+    def sign(p1, p2, p3):
+        return (p1[0] - p3[0]) * (p2[1] - p3[1]) - (p2[0] - p3[0]) * (p1[1] - p3[1])
+    d1, d2, d3 = sign(p, a, b), sign(p, b, c), sign(p, c, a)
+    neg = (d1 < -1e-12) or (d2 < -1e-12) or (d3 < -1e-12)
+    pos = (d1 > 1e-12) or (d2 > 1e-12) or (d3 > 1e-12)
+    return not (neg and pos)
+
+
+def _rs_triangulate(poly):
+    """Ear-clipping triangulation of a simple polygon. Returns triangles as
+    index triples into `poly`, always wound counter-clockwise. Falls back to a
+    centroid-free fan over whatever is left if the polygon self-intersects, so
+    a sloppy scan still produces a usable (if imperfect) floor."""
+    n = len(poly)
+    if n < 3:
+        return []
+    order = list(range(n))
+    if _rs_poly_area(poly) < 0:
+        order.reverse()
+    tris = []
+    guard = 0
+    while len(order) > 3 and guard < 4 * n * n:
+        guard += 1
+        m = len(order)
+        cut = -1
+        for i in range(m):
+            a, b, c = order[(i - 1) % m], order[i], order[(i + 1) % m]
+            ax, ay = poly[a]
+            bx, by = poly[b]
+            cx, cy = poly[c]
+            cross = (bx - ax) * (cy - ay) - (by - ay) * (cx - ax)
+            if cross <= 1e-12:
+                continue                      # reflex or collinear - not an ear
+            blocked = False
+            for j in order:
+                if j in (a, b, c):
+                    continue
+                if _rs_in_tri(poly[j], poly[a], poly[b], poly[c]):
+                    blocked = True
+                    break
+            if not blocked:
+                tris.append((a, b, c))
+                cut = i
+                break
+        if cut < 0:
+            break                             # degenerate - bail to the fan
+        order.pop(cut)
+    if len(order) == 3:
+        tris.append((order[0], order[1], order[2]))
+    elif len(order) > 3:
+        for i in range(1, len(order) - 1):
+            tris.append((order[0], order[i], order[i + 1]))
+    return tris
+
+
+# --- mesh ------------------------------------------------------------------
+class _RsGroup(object):
+    """One material group of the room mesh (Z-up, metres)."""
+
+    def __init__(self, name, material):
+        self.name = name
+        self.material = material
+        self.pos = []        # flat [x, y, z, ...]
+        self.nrm = []        # flat [nx, ny, nz, ...]
+        self.idx = []        # flat triangle indices
+
+    def quad(self, a, b, c, d, n):
+        """Add a planar quad a->b->c->d (already in winding order) with normal n."""
+        base = len(self.pos) // 3
+        for v in (a, b, c, d):
+            self.pos.extend([v[0], v[1], v[2]])
+            self.nrm.extend([n[0], n[1], n[2]])
+        self.idx.extend([base, base + 1, base + 2, base, base + 2, base + 3])
+
+    def tri(self, a, b, c, n):
+        base = len(self.pos) // 3
+        for v in (a, b, c):
+            self.pos.extend([v[0], v[1], v[2]])
+            self.nrm.extend([n[0], n[1], n[2]])
+        self.idx.extend([base, base + 1, base + 2])
+
+    def empty(self):
+        return not self.idx
+
+
+def _rs_wall_cells(L, H, openings):
+    """Split a wall of length L and height H into the rectangles that remain
+    once the openings are removed. Cuts the wall on every opening edge and
+    keeps the cells whose centre is not inside an opening - correct for any
+    number of openings, overlapping or not."""
+    us = {0.0, L}
+    zs = {0.0, H}
+    for o in openings:
+        us.add(max(0.0, min(L, o["u0"])))
+        us.add(max(0.0, min(L, o["u1"])))
+        zs.add(max(0.0, min(H, o["z0"])))
+        zs.add(max(0.0, min(H, o["z1"])))
+    us = sorted(us)
+    zs = sorted(zs)
+    cells = []
+    for i in range(len(us) - 1):
+        u0, u1 = us[i], us[i + 1]
+        if u1 - u0 < 1e-6:
+            continue
+        for j in range(len(zs) - 1):
+            z0, z1 = zs[j], zs[j + 1]
+            if z1 - z0 < 1e-6:
+                continue
+            cu, cz = (u0 + u1) / 2.0, (z0 + z1) / 2.0
+            hole = False
+            for o in openings:
+                if o["u0"] - 1e-9 <= cu <= o["u1"] + 1e-9 and \
+                   o["z0"] - 1e-9 <= cz <= o["z1"] + 1e-9:
+                    hole = True
+                    break
+            if not hole:
+                cells.append((u0, u1, z0, z1))
+    return cells
+
+
+def _rs_build_mesh(scan):
+    """Build the room mesh from a validated scan. Returns (groups, stats).
+
+    Walls carry the INWARD normal (you are standing in the room), the floor
+    points up and the ceiling down. Everything is Z-up here; the exporters
+    convert to the Y-up convention glTF/OBJ viewers expect."""
+    floor = scan["floor"]
+    H = scan["ceiling"]
+    n = len(floor)
+
+    g_floor = _RsGroup("Floor", 0)
+    g_ceil = _RsGroup("Ceiling", 1)
+    g_wall = _RsGroup("Walls", 2)
+    g_obj = _RsGroup("Objects", 3)
+
+    # floor + ceiling
+    tris = _rs_triangulate(floor)
+    for (a, b, c) in tris:
+        pa = (floor[a][0], floor[a][1], 0.0)
+        pb = (floor[b][0], floor[b][1], 0.0)
+        pc = (floor[c][0], floor[c][1], 0.0)
+        g_floor.tri(pa, pb, pc, (0.0, 0.0, 1.0))
+        # ceiling: same triangle at z=H, wound the other way so it faces down
+        ca = (floor[a][0], floor[a][1], H)
+        cb = (floor[b][0], floor[b][1], H)
+        cc = (floor[c][0], floor[c][1], H)
+        g_ceil.tri(ca, cc, cb, (0.0, 0.0, -1.0))
+
+    # walls
+    wall_lengths = []
+    for i in range(n):
+        ax, ay = floor[i]
+        bx, by = floor[(i + 1) % n]
+        L = math.hypot(bx - ax, by - ay)
+        wall_lengths.append(L)
+        if L < 1e-6:
+            continue
+        dx, dy = (bx - ax) / L, (by - ay) / L
+        nx, ny = -dy, dx                      # inward for a CCW polygon
+        mine = [o for o in scan["openings"] if o["wall"] == i]
+        for (u0, u1, z0, z1) in _rs_wall_cells(L, H, mine):
+            p = lambda u, z: (ax + dx * u, ay + dy * u, z)
+            # (u0,z0) -> (u0,z1) -> (u1,z1) -> (u1,z0) faces inward
+            g_wall.quad(p(u0, z0), p(u0, z1), p(u1, z1), p(u1, z0), (nx, ny, 0.0))
+
+    # furniture boxes
+    for ob in scan["objects"]:
+        _rs_box(g_obj, ob)
+
+    groups = [g for g in (g_floor, g_ceil, g_wall, g_obj) if not g.empty()]
+
+    area = abs(_rs_poly_area(floor))
+    stats = {
+        "area_m2": area,
+        "perimeter_m": _rs_poly_perimeter(floor),
+        "ceiling_m": H,
+        "volume_m3": area * H,
+        "wall_lengths_m": wall_lengths,
+        "corners": n,
+        "openings": len(scan["openings"]),
+        "objects": len(scan["objects"]),
+        "triangles": sum(len(g.idx) for g in groups) // 3,
+    }
+    return groups, stats
+
+
+def _rs_box(group, ob):
+    """Add an axis-aligned-then-yawed box sitting on the floor."""
+    cx, cy = ob["x"], ob["y"]
+    hw, hd, h = ob["w"] / 2.0, ob["d"] / 2.0, ob["h"]
+    yaw = math.radians(ob.get("yaw") or 0.0)
+    ca, sa = math.cos(yaw), math.sin(yaw)
+
+    def w(lx, ly, lz):
+        return (cx + lx * ca - ly * sa, cy + lx * sa + ly * ca, lz)
+
+    c = [w(-hw, -hd, 0.0), w(hw, -hd, 0.0), w(hw, hd, 0.0), w(-hw, hd, 0.0),
+         w(-hw, -hd, h), w(hw, -hd, h), w(hw, hd, h), w(-hw, hd, h)]
+    # (indices into c, outward normal in local space)
+    faces = [((4, 5, 6, 7), (0.0, 0.0, 1.0)),        # top
+             ((3, 2, 1, 0), (0.0, 0.0, -1.0)),       # bottom
+             ((0, 1, 5, 4), (0.0, -1.0, 0.0)),       # -y
+             ((2, 3, 7, 6), (0.0, 1.0, 0.0)),        # +y
+             ((1, 2, 6, 5), (1.0, 0.0, 0.0)),        # +x
+             ((3, 0, 4, 7), (-1.0, 0.0, 0.0))]       # -x
+    for (ids, ln) in faces:
+        nx = ln[0] * ca - ln[1] * sa
+        ny = ln[0] * sa + ln[1] * ca
+        group.quad(c[ids[0]], c[ids[1]], c[ids[2]], c[ids[3]], (nx, ny, ln[2]))
+
+
+# --- exporters -------------------------------------------------------------
+# Internally the room is Z-up (x east, y north, z up). glTF and every OBJ
+# viewer expect Y-up, right-handed: (x, y, z) -> (x, z, -y) keeps the
+# handedness, so face winding and normals survive the conversion.
+def _rs_to_yup(x, y, z):
+    return (x, z, -y)
+
+
+_RS_MATERIALS = [
+    # name,           base colour RGBA,             metallic, roughness
+    ("Floor", (0.55, 0.42, 0.30, 1.0), 0.0, 0.85),
+    ("Ceiling", (0.94, 0.94, 0.92, 1.0), 0.0, 0.95),
+    ("Walls", (0.82, 0.83, 0.85, 1.0), 0.0, 0.90),
+    ("Objects", (0.35, 0.55, 0.72, 1.0), 0.0, 0.70),
+]
+
+
+def _rs_write_obj(path, groups, name="Room"):
+    """Wavefront OBJ + companion MTL. Written by hand - no dependencies."""
+    mtl_path = Path(str(path)[:-4] + ".mtl") if str(path).endswith(".obj") \
+        else Path(str(path) + ".mtl")
+    lines = ["# JARVIS RoomScan - %s" % name,
+             "mtllib %s" % mtl_path.name, "s off"]
+    vbase = 1                                  # OBJ indices are 1-based
+    for g in groups:
+        mat = _RS_MATERIALS[g.material][0]
+        lines.append("o %s" % g.name)
+        lines.append("usemtl %s" % mat)
+        cnt = len(g.pos) // 3
+        for i in range(cnt):
+            x, y, z = _rs_to_yup(g.pos[3 * i], g.pos[3 * i + 1], g.pos[3 * i + 2])
+            lines.append("v %.5f %.5f %.5f" % (x, y, z))
+        for i in range(cnt):
+            x, y, z = _rs_to_yup(g.nrm[3 * i], g.nrm[3 * i + 1], g.nrm[3 * i + 2])
+            lines.append("vn %.5f %.5f %.5f" % (x, y, z))
+        for t in range(0, len(g.idx), 3):
+            a = g.idx[t] + vbase
+            b = g.idx[t + 1] + vbase
+            c = g.idx[t + 2] + vbase
+            lines.append("f %d//%d %d//%d %d//%d" % (a, a, b, b, c, c))
+        vbase += cnt
+    Path(path).write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+    mtl = []
+    for (mname, col, _metal, rough) in _RS_MATERIALS:
+        mtl.append("newmtl %s" % mname)
+        mtl.append("Kd %.4f %.4f %.4f" % (col[0], col[1], col[2]))
+        mtl.append("Ka 0.05 0.05 0.05")
+        mtl.append("Ks 0.05 0.05 0.05")
+        mtl.append("Ns %.1f" % max(1.0, (1.0 - rough) * 200.0))
+        mtl.append("d 1.0")
+        mtl.append("illum 2")
+        mtl.append("")
+    mtl_path.write_text("\n".join(mtl), encoding="utf-8")
+    return mtl_path
+
+
+def _rs_write_glb(path, groups, name="Room"):
+    """Binary glTF 2.0, assembled by hand (no pygltflib dependency) so the
+    model drops straight into Blender / Windows 3D Viewer / three.js."""
+    bin_parts = []
+    offset = 0
+    buffer_views = []
+    accessors = []
+    primitives = []
+
+    def add_view(data, target):
+        nonlocal offset
+        pad = (-len(data)) % 4
+        bin_parts.append(data + b"\x00" * pad)
+        buffer_views.append({"buffer": 0, "byteOffset": offset,
+                             "byteLength": len(data), "target": target})
+        offset += len(data) + pad
+        return len(buffer_views) - 1
+
+    for g in groups:
+        cnt = len(g.pos) // 3
+        pos_y = []
+        nrm_y = []
+        for i in range(cnt):
+            pos_y.extend(_rs_to_yup(g.pos[3 * i], g.pos[3 * i + 1], g.pos[3 * i + 2]))
+            nrm_y.extend(_rs_to_yup(g.nrm[3 * i], g.nrm[3 * i + 1], g.nrm[3 * i + 2]))
+        pmin = [min(pos_y[k::3]) for k in range(3)]
+        pmax = [max(pos_y[k::3]) for k in range(3)]
+
+        v_pos = add_view(struct.pack("<%df" % len(pos_y), *pos_y), 34962)
+        accessors.append({"bufferView": v_pos, "componentType": 5126,
+                          "count": cnt, "type": "VEC3",
+                          "min": pmin, "max": pmax})
+        a_pos = len(accessors) - 1
+
+        v_nrm = add_view(struct.pack("<%df" % len(nrm_y), *nrm_y), 34962)
+        accessors.append({"bufferView": v_nrm, "componentType": 5126,
+                          "count": cnt, "type": "VEC3"})
+        a_nrm = len(accessors) - 1
+
+        v_idx = add_view(struct.pack("<%dI" % len(g.idx), *g.idx), 34963)
+        accessors.append({"bufferView": v_idx, "componentType": 5125,
+                          "count": len(g.idx), "type": "SCALAR"})
+        a_idx = len(accessors) - 1
+
+        primitives.append({"attributes": {"POSITION": a_pos, "NORMAL": a_nrm},
+                           "indices": a_idx, "material": g.material, "mode": 4})
+
+    materials = []
+    for (mname, col, metal, rough) in _RS_MATERIALS:
+        materials.append({
+            "name": mname,
+            "doubleSided": True,
+            "pbrMetallicRoughness": {
+                "baseColorFactor": list(col),
+                "metallicFactor": metal,
+                "roughnessFactor": rough,
+            },
+        })
+
+    gltf = {
+        "asset": {"version": "2.0", "generator": "JARVIS RoomScan v4.68"},
+        "scene": 0,
+        "scenes": [{"nodes": [0]}],
+        "nodes": [{"mesh": 0, "name": name}],
+        "meshes": [{"name": name, "primitives": primitives}],
+        "materials": materials,
+        "buffers": [{"byteLength": offset}],
+        "bufferViews": buffer_views,
+        "accessors": accessors,
+    }
+    json_bytes = json.dumps(gltf, separators=(",", ":")).encode("utf-8")
+    json_bytes += b" " * ((-len(json_bytes)) % 4)
+    bin_bytes = b"".join(bin_parts)
+    total = 12 + 8 + len(json_bytes) + 8 + len(bin_bytes)
+    out = bytearray()
+    out += struct.pack("<III", 0x46546C67, 2, total)          # 'glTF', v2, size
+    out += struct.pack("<II", len(json_bytes), 0x4E4F534A)    # 'JSON'
+    out += json_bytes
+    out += struct.pack("<II", len(bin_bytes), 0x004E4942)     # 'BIN\0'
+    out += bin_bytes
+    Path(path).write_bytes(bytes(out))
+
+
+def _rs_write_plan_svg(path, scan, stats):
+    """A dimensioned floor plan: walls with lengths, doors and windows marked,
+    furniture footprints, scan stations and a north arrow."""
+    floor = scan["floor"]
+    xs = [p[0] for p in floor]
+    ys = [p[1] for p in floor]
+    pad = 1.2
+    minx, maxx = min(xs) - pad, max(xs) + pad
+    miny, maxy = min(ys) - pad, max(ys) + pad
+    w_m, h_m = max(0.5, maxx - minx), max(0.5, maxy - miny)
+    scale = min(900.0 / w_m, 640.0 / h_m)
+    W, H = w_m * scale, h_m * scale + 78.0
+
+    def sx(x):
+        return (x - minx) * scale
+
+    def sy(y):
+        return (maxy - y) * scale            # SVG y grows downwards
+
+    s = ['<svg xmlns="http://www.w3.org/2000/svg" width="%.0f" height="%.0f" '
+         'viewBox="0 0 %.0f %.0f" font-family="Segoe UI,Arial,sans-serif">'
+         % (W, H, W, H)]
+    s.append('<rect width="100%%" height="100%%" fill="#0a0c10"/>')
+    poly = " ".join("%.1f,%.1f" % (sx(p[0]), sy(p[1])) for p in floor)
+    s.append('<polygon points="%s" fill="#161b23" stroke="#ff8c42" '
+             'stroke-width="3" stroke-linejoin="round"/>' % poly)
+
+    n = len(floor)
+    for i in range(n):
+        ax, ay = floor[i]
+        bx, by = floor[(i + 1) % n]
+        L = math.hypot(bx - ax, by - ay)
+        if L < 1e-6:
+            continue
+        dx, dy = (bx - ax) / L, (by - ay) / L
+        for o in scan["openings"]:
+            if o["wall"] != i:
+                continue
+            p0 = (ax + dx * o["u0"], ay + dy * o["u0"])
+            p1 = (ax + dx * o["u1"], ay + dy * o["u1"])
+            col = "#46e0d6" if o["type"] == "door" else "#ffd166"
+            s.append('<line x1="%.1f" y1="%.1f" x2="%.1f" y2="%.1f" '
+                     'stroke="%s" stroke-width="6" stroke-linecap="round"/>'
+                     % (sx(p0[0]), sy(p0[1]), sx(p1[0]), sy(p1[1]), col))
+        # wall length label, nudged outwards
+        mx, my = (ax + bx) / 2.0, (ay + by) / 2.0
+        ox, oy = dy * 0.34, -dx * 0.34        # outward for a CCW polygon
+        s.append('<text x="%.1f" y="%.1f" fill="#e6edf3" font-size="13" '
+                 'text-anchor="middle">%.2f m</text>'
+                 % (sx(mx + ox), sy(my + oy) + 4, L))
+
+    for ob in scan["objects"]:
+        cx, cy = ob["x"], ob["y"]
+        hw, hd = ob["w"] / 2.0, ob["d"] / 2.0
+        yaw = math.radians(ob.get("yaw") or 0.0)
+        ca, sa = math.cos(yaw), math.sin(yaw)
+        pts = []
+        for (lx, ly) in ((-hw, -hd), (hw, -hd), (hw, hd), (-hw, hd)):
+            pts.append((cx + lx * ca - ly * sa, cy + lx * sa + ly * ca))
+        s.append('<polygon points="%s" fill="rgba(90,150,200,.30)" '
+                 'stroke="#5a96c8" stroke-width="1.5"/>'
+                 % " ".join("%.1f,%.1f" % (sx(p[0]), sy(p[1])) for p in pts))
+        s.append('<text x="%.1f" y="%.1f" fill="#9fc6e6" font-size="11" '
+                 'text-anchor="middle">%s</text>'
+                 % (sx(cx), sy(cy) + 4, _rs_xml(ob["label"])))
+
+    for st in scan["stations"]:
+        s.append('<circle cx="%.1f" cy="%.1f" r="5" fill="#ff5d5d" '
+                 'stroke="#0a0c10" stroke-width="2"/>'
+                 % (sx(st["x"]), sy(st["y"])))
+
+    ax0, ay0 = W - 44, 46
+    s.append('<line x1="%.1f" y1="%.1f" x2="%.1f" y2="%.1f" stroke="#8b97a5" '
+             'stroke-width="2"/>' % (ax0, ay0 + 22, ax0, ay0 - 14))
+    s.append('<polygon points="%.1f,%.1f %.1f,%.1f %.1f,%.1f" fill="#8b97a5"/>'
+             % (ax0, ay0 - 20, ax0 - 5, ay0 - 8, ax0 + 5, ay0 - 8))
+    s.append('<text x="%.1f" y="%.1f" fill="#8b97a5" font-size="11" '
+             'text-anchor="middle">N</text>' % (ax0, ay0 + 36))
+
+    s.append('<text x="16" y="%.0f" fill="#ff8c42" font-size="17" '
+             'font-weight="700">%s</text>' % (H - 44, _rs_xml(scan["name"])))
+    s.append('<text x="16" y="%.0f" fill="#8b97a5" font-size="13">'
+             '%.2f m&#178; &#183; perimeter %.2f m &#183; ceiling %.2f m '
+             '&#183; %d corners</text>'
+             % (H - 22, stats["area_m2"], stats["perimeter_m"],
+                stats["ceiling_m"], stats["corners"]))
+    s.append("</svg>")
+    Path(path).write_text("\n".join(s), encoding="utf-8")
+
+
+def _rs_xml(t):
+    return (str(t).replace("&", "&amp;").replace("<", "&lt;")
+            .replace(">", "&gt;").replace('"', "&quot;"))
+
+
+# --- save ------------------------------------------------------------------
+def _rs_save(raw):
+    """Validate, build and write a scan to disk. Returns the summary dict that
+    goes back to the phone. Raises ValueError on a bad document."""
+    scan = _rs_validate(raw)
+    groups, stats = _rs_build_mesh(scan)
+
+    stamp = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
+    folder = _rs_root() / ("%s_%s" % (_rs_slug(scan["name"]), stamp))
+    folder.mkdir(parents=True, exist_ok=True)
+
+    scan["id"] = folder.name
+    scan["created"] = datetime.datetime.now().isoformat(timespec="seconds")
+    scan["stats"] = stats
+    with open(folder / "scan.json", "w", encoding="utf-8") as f:
+        json.dump(scan, f, ensure_ascii=False, indent=1)
+    _rs_write_obj(folder / "room.obj", groups, scan["name"])
+    _rs_write_glb(folder / "room.glb", groups, scan["name"])
+    _rs_write_plan_svg(folder / "plan.svg", scan, stats)
+    _rs_write_note(scan, stats, folder)
+
+    return {"id": folder.name, "name": scan["name"], "folder": str(folder),
+            "stats": stats}
+
+
+def _rs_write_note(scan, stats, folder):
+    """Drop a note in the Obsidian vault so a room is searchable later."""
+    try:
+        out = Path(KNOWLEDGE_DIR) / "Rooms"
+        out.mkdir(parents=True, exist_ok=True)
+        walls = "\n".join(
+            "| %d | %.2f |" % (i + 1, L)
+            for i, L in enumerate(stats["wall_lengths_m"]))
+        ops = "\n".join(
+            "| %s | wall %d | %.2f m wide | %.2f-%.2f m high |"
+            % (o["type"], o["wall"] + 1, o["u1"] - o["u0"], o["z0"], o["z1"])
+            for o in scan["openings"]) or "| - | - | - | - |"
+        md = (
+            "# %s\n\n"
+            "*Scanned %s with the JARVIS RoomScan phone scanner (%s mode).*\n\n"
+            "| Measure | Value |\n|---|---|\n"
+            "| Floor area | %.2f m2 |\n| Perimeter | %.2f m |\n"
+            "| Ceiling height | %.2f m |\n| Volume | %.2f m3 |\n"
+            "| Corners | %d |\n| Openings | %d |\n\n"
+            "## Walls\n\n| Wall | Length (m) |\n|---|---|\n%s\n\n"
+            "## Openings\n\n| Type | Wall | Width | Height |\n|---|---|---|---|\n%s\n\n"
+            "## Files\n\n- `%s/room.glb` - 3D model (glTF)\n"
+            "- `%s/room.obj` - 3D model (Wavefront)\n"
+            "- `%s/plan.svg` - dimensioned floor plan\n"
+            % (scan["name"], scan["created"],
+               scan.get("meta", {}).get("mode", "sensor"),
+               stats["area_m2"], stats["perimeter_m"], stats["ceiling_m"],
+               stats["volume_m3"], stats["corners"], stats["openings"],
+               walls, ops, folder.name, folder.name, folder.name))
+        (out / (_rs_slug(scan["name"]) + ".md")).write_text(md, encoding="utf-8")
+    except Exception as e:
+        print("[diag] roomscan note failed:", repr(e))
+
+
+# --- the phone-facing server ------------------------------------------------
+# The phone MUST reach this over HTTPS: browsers only hand out the camera and
+# the motion sensors in a "secure context", and http://192.168.x.x is not one.
+# So RoomScan runs its own TLS listener with a self-signed certificate. The
+# first visit shows the usual "not private" warning - tap through it once and
+# the page is a secure context from then on.
+def _rs_lan_ip():
+    """Best guess at the address the phone should dial. No packet is sent -
+    connect() on a UDP socket just picks the outbound interface."""
+    import socket as _s
+    try:
+        sk = _s.socket(_s.AF_INET, _s.SOCK_DGRAM)
+        sk.settimeout(0.4)
+        try:
+            sk.connect(("8.8.8.8", 80))
+            return sk.getsockname()[0]
+        finally:
+            sk.close()
+    except Exception:
+        pass
+    try:
+        return _s.gethostbyname(_s.gethostname())
+    except Exception:
+        return "127.0.0.1"
+
+
+def _rs_token():
+    """Per-session shared secret. It rides in the QR URL, so the scanner and
+    every API call are useless to anything else on the LAN."""
+    with _roomscan_lock:
+        if not _roomscan_state["token"]:
+            _roomscan_state["token"] = secrets.token_urlsafe(12)
+        return _roomscan_state["token"]
+
+
+def _rs_auth(handler, params=None):
+    """Constant-time token check; the token may arrive as ?k= or X-RoomScan-Key."""
+    want = _rs_token()
+    got = ""
+    try:
+        if params and params.get("k"):
+            got = params["k"][0]
+        if not got:
+            got = handler.headers.get("X-RoomScan-Key", "") or ""
+    except Exception:
+        got = ""
+    return hmac.compare_digest(str(got), want)
+
+
+def _rs_cert(host):
+    """Ensure a self-signed cert/key pair valid for `host` exists, and return
+    (certfile, keyfile) - or None when neither the cryptography package nor an
+    openssl binary is available. Regenerated when the LAN address changes."""
+    d = Path(__file__).resolve().parent / ".roomscan_cert"
+    d.mkdir(parents=True, exist_ok=True)
+    cert, key, meta = d / "cert.pem", d / "key.pem", d / "meta.json"
+    try:
+        if cert.exists() and key.exists() and meta.exists():
+            if json.loads(meta.read_text(encoding="utf-8")).get("host") == host:
+                return (str(cert), str(key))
+    except Exception:
+        pass
+
+    try:
+        made = _rs_cert_openssl(cert, key, host) or _rs_cert_cryptography(cert, key, host)
+    except (KeyboardInterrupt, SystemExit):
+        raise
+    except BaseException as e:
+        print("[diag] roomscan cert generation failed:", repr(e))
+        made = False
+    if not made:
+        return None
+    try:
+        meta.write_text(json.dumps({"host": host,
+                                    "created": datetime.datetime.now().isoformat()}),
+                        encoding="utf-8")
+    except Exception:
+        pass
+    return (str(cert), str(key))
+
+
+# Certificate generation runs OUT OF PROCESS. A half-installed `cryptography`
+# (rust bindings without _cffi_backend) does not raise ImportError - pyo3
+# panics, and a panic leaves the interpreter in a state where the next thread
+# start can hang forever. Catching the exception is not enough; the import must
+# not happen inside JARVIS at all. openssl is tried first because it needs no
+# import, then cryptography in a throwaway child process.
+_RS_CERT_SCRIPT = r"""
+import sys, datetime, ipaddress
+from cryptography import x509
+from cryptography.x509.oid import NameOID
+from cryptography.hazmat.primitives import hashes, serialization
+from cryptography.hazmat.primitives.asymmetric import rsa
+
+cert_path, key_path, host = sys.argv[1], sys.argv[2], sys.argv[3]
+k = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "JARVIS RoomScan")])
+alt = [x509.DNSName("localhost"), x509.IPAddress(ipaddress.ip_address("127.0.0.1"))]
+try:
+    alt.append(x509.IPAddress(ipaddress.ip_address(host)))
+except Exception:
+    alt.append(x509.DNSName(host))
+now = datetime.datetime.now(datetime.timezone.utc)
+crt = (x509.CertificateBuilder()
+       .subject_name(name).issuer_name(name).public_key(k.public_key())
+       .serial_number(x509.random_serial_number())
+       .not_valid_before(now - datetime.timedelta(days=1))
+       .not_valid_after(now + datetime.timedelta(days=825))
+       .add_extension(x509.SubjectAlternativeName(alt), critical=False)
+       .add_extension(x509.BasicConstraints(ca=False, path_length=None), critical=True)
+       .sign(k, hashes.SHA256()))
+open(key_path, "wb").write(k.private_bytes(
+    serialization.Encoding.PEM,
+    serialization.PrivateFormat.TraditionalOpenSSL,
+    serialization.NoEncryption()))
+open(cert_path, "wb").write(crt.public_bytes(serialization.Encoding.PEM))
+"""
+
+
+def _rs_no_console():
+    """CREATE_NO_WINDOW, so a helper process never flashes a console."""
+    return 0x08000000 if os.name == "nt" else 0
+
+
+def _rs_cert_cryptography(cert, key, host):
+    try:
+        r = subprocess.run([sys.executable, "-c", _RS_CERT_SCRIPT,
+                            str(cert), str(key), str(host)],
+                           stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
+                           timeout=120, creationflags=_rs_no_console())
+        if r.returncode == 0 and cert.exists() and key.exists():
+            return True
+        print("[diag] roomscan cert (cryptography child) rc=%s: %s"
+              % (r.returncode, (r.stderr or b"")[-200:]))
+    except Exception as e:
+        print("[diag] roomscan cert (cryptography child) failed:", repr(e))
+    return False
+
+
+def _rs_cert_openssl(cert, key, host):
+    exe = shutil.which("openssl")
+    if not exe:
+        return False
+    san = "subjectAltName=DNS:localhost,IP:127.0.0.1"
+    try:
+        import ipaddress
+        ipaddress.ip_address(host)
+        san += ",IP:" + host
+    except Exception:
+        san += ",DNS:" + str(host)
+    base = [exe, "req", "-x509", "-newkey", "rsa:2048", "-sha256", "-days", "825",
+            "-nodes", "-keyout", str(key), "-out", str(cert),
+            "-subj", "/CN=JARVIS RoomScan"]
+    for args in ([base + ["-addext", san], base]):     # -addext needs openssl 1.1.1+
+        try:
+            r = subprocess.run(args, stdout=subprocess.DEVNULL,
+                               stderr=subprocess.PIPE, timeout=90,
+                               creationflags=_rs_no_console())
+            if r.returncode == 0 and cert.exists() and key.exists():
+                return True
+        except Exception as e:
+            print("[diag] roomscan cert (openssl) failed:", repr(e))
+    return False
+
+
+class _RoomScanHandler(http.server.BaseHTTPRequestHandler):
+    """Serves exactly one page and a handful of JSON endpoints. Nothing here
+    touches the brain, spends API budget or reads outside RoomScans/."""
+
+    server_version = "JARVIS-RoomScan/1.0"
+    protocol_version = "HTTP/1.1"
+
+    def log_message(self, fmt, *args):
+        pass                                    # keep the JARVIS console clean
+
+    def _send(self, code, body=b"", ctype="application/json", close=False):
+        try:
+            self.send_response(code)
+            self.send_header("Content-Type", ctype)
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("X-Content-Type-Options", "nosniff")
+            self.send_header("Referrer-Policy", "no-referrer")
+            if close:
+                # We are answering without draining the request body, so the
+                # connection is out of sync - say so instead of letting the
+                # client's next request be parsed out of leftover body bytes.
+                self.send_header("Connection", "close")
+                self.close_connection = True
+            self.end_headers()
+            if body:
+                self.wfile.write(body)
+        except Exception:
+            pass
+
+    def _json(self, code, obj, close=False):
+        self._send(code, json.dumps(obj, ensure_ascii=False).encode("utf-8"),
+                   close=close)
+
+    def _deny(self):
+        self._send(403, b"<!doctype html><meta charset=utf-8>"
+                        b"<body style='background:#0a0c10;color:#8b97a5;"
+                        b"font-family:system-ui;padding:40px'>"
+                        b"<h3 style='color:#ff8c42'>RoomScan</h3>"
+                        b"<p>Open this page from the QR code JARVIS shows "
+                        b"(the link carries a one-time key).</p>",
+                   "text/html; charset=utf-8")
+
+    def do_GET(self):
+        parsed = urllib.parse.urlparse(self.path)
+        params = urllib.parse.parse_qs(parsed.query)
+        path = parsed.path
+
+        if path == "/api/ping":
+            if not _rs_auth(self, params):
+                self._json(403, {"error": "bad key"})
+                return
+            self._json(200, {"ok": True, "host": _roomscan_state.get("host", ""),
+                             "scans": len(_rs_scan_dirs())})
+            return
+
+        if path == "/api/scans":
+            if not _rs_auth(self, params):
+                self._json(403, {"error": "bad key"})
+                return
+            self._json(200, {"scans": _rs_index()})
+            return
+
+        if path in ("/", "/index.html", "/roomscan.html", "/scan"):
+            if not _rs_auth(self, params):
+                self._deny()
+                return
+            try:
+                page = (Path(__file__).resolve().parent / "roomscan.html")
+                self._send(200, page.read_bytes(), "text/html; charset=utf-8")
+            except Exception as e:
+                self._send(500, ("roomscan.html missing: %s" % e).encode("utf-8"),
+                           "text/plain; charset=utf-8")
+            return
+
+        if path == "/favicon.ico":
+            self._send(204)
+            return
+        self._json(404, {"error": "not found"})
+
+    def do_POST(self):
+        parsed = urllib.parse.urlparse(self.path)
+        params = urllib.parse.parse_qs(parsed.query)
+        if not _rs_auth(self, params):
+            self._json(403, {"error": "bad key"}, close=True)
+            return
+        try:
+            length = int(self.headers.get("Content-Length") or 0)
+        except ValueError:
+            length = 0
+        cap = ROOMSCAN_MAX_PHOTO if parsed.path == "/api/photo" else ROOMSCAN_MAX_JSON
+        if length <= 0 or length > cap:
+            self._json(413, {"error": "body too large or empty"}, close=True)
+            return
+        try:
+            raw = self.rfile.read(length)
+        except Exception as e:
+            self._json(400, {"error": "read failed: %s" % e})
+            return
+
+        if parsed.path == "/api/scan":
+            try:
+                doc = json.loads(raw.decode("utf-8"))
+            except Exception as e:
+                self._json(400, {"error": "bad json: %s" % e})
+                return
+            try:
+                res = _rs_save(doc)
+            except ValueError as e:
+                self._json(400, {"error": str(e)})
+                return
+            except Exception as e:
+                print("[diag] roomscan save failed:", repr(e))
+                self._json(500, {"error": "save failed: %r" % (e,)})
+                return
+            _roomscan_state["last"] = res
+            print("[diag] roomscan saved %s (%.2f m2)"
+                  % (res["id"], res["stats"]["area_m2"]))
+            self._json(200, res)
+            return
+
+        if parsed.path == "/api/photo":
+            name = _rs_slug((params.get("name") or [""])[0], "room")
+            try:
+                dirs = [p for p in _rs_scan_dirs() if p.name.startswith(name + "_")]
+                target = dirs[0] if dirs else (_rs_root() / ("_inbox_" + name))
+                shots = target / "photos"
+                shots.mkdir(parents=True, exist_ok=True)
+                if len(list(shots.glob("*.jpg"))) >= ROOMSCAN_MAX_PHOTOS:
+                    self._json(429, {"error": "photo limit reached"})
+                    return
+                fn = shots / (datetime.datetime.now().strftime("%H%M%S_%f") + ".jpg")
+                fn.write_bytes(raw)
+                self._json(200, {"ok": True, "file": fn.name})
+            except Exception as e:
+                self._json(500, {"error": "%r" % (e,)})
+            return
+
+        self._json(404, {"error": "not found"})
+
+
+class _RoomScanServer(http.server.ThreadingHTTPServer):
+    daemon_threads = True
+
+    def server_bind(self):
+        # http.server.HTTPServer.server_bind() calls socket.getfqdn() on the
+        # bind address - a reverse-DNS lookup that stalls for many seconds on a
+        # machine whose resolver is slow or absent, delaying start-up for no
+        # benefit. Bind the socket and fill the two fields in directly.
+        socketserver.TCPServer.server_bind(self)
+        host, port = self.server_address[:2]
+        self.server_name = host
+        self.server_port = port
+
+    def handle_error(self, request, client_address):
+        # A plain-HTTP probe against the TLS port raises here; that is normal
+        # noise on a LAN, not something to dump a traceback for.
+        exc = sys.exc_info()[1]
+        if isinstance(exc, ssl.SSLError):
+            return
+        if isinstance(exc, (ConnectionResetError, BrokenPipeError)):
+            return
+        http.server.ThreadingHTTPServer.handle_error(self, request, client_address)
+
+
+def _rs_index():
+    """Compact list of saved scans for the viewer."""
+    out = []
+    for d in _rs_scan_dirs()[:200]:
+        try:
+            with open(d / "scan.json", "r", encoding="utf-8") as f:
+                s = json.load(f)
+            st = s.get("stats") or {}
+            out.append({"id": d.name, "name": s.get("name", d.name),
+                        "created": s.get("created", ""),
+                        "area_m2": st.get("area_m2", 0),
+                        "ceiling_m": st.get("ceiling_m", 0),
+                        "corners": st.get("corners", 0),
+                        "openings": st.get("openings", 0)})
+        except Exception:
+            continue
+    return out
+
+
+def _start_roomscan_server(port=ROOMSCAN_PORT):
+    """Bring the phone-facing scanner up on 0.0.0.0:port over TLS. Idempotent.
+    Returns a dict describing what the phone should open."""
+    global _roomscan_started
+    with _roomscan_lock:
+        if _roomscan_started:
+            return dict(_roomscan_state)
+        host = _rs_lan_ip()
+        _roomscan_state["host"] = host
+        _roomscan_state["error"] = ""
+        pair = _rs_cert(host)
+        try:
+            srv = _RoomScanServer(("0.0.0.0", port), _RoomScanHandler)
+        except OSError as e:
+            _roomscan_state["error"] = "port %d busy (%s)" % (port, e)
+            print("[diag] roomscan could not bind %d: %r" % (port, e))
+            return dict(_roomscan_state)
+        scheme = "http"
+        if pair:
+            try:
+                ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+                ctx.load_cert_chain(pair[0], pair[1])
+                srv.socket = ctx.wrap_socket(srv.socket, server_side=True)
+                scheme = "https"
+                _roomscan_state["https"] = True
+            except Exception as e:
+                _roomscan_state["error"] = "TLS setup failed: %r" % (e,)
+                print("[diag] roomscan TLS failed, falling back to http:", repr(e))
+        else:
+            _roomscan_state["error"] = ("no certificate - install the 'cryptography' "
+                                        "package or openssl for camera access")
+        threading.Thread(target=srv.serve_forever, daemon=True,
+                         name="jarvis-roomscan").start()
+        _roomscan_state["url"] = "%s://%s:%d/?k=%s" % (scheme, host, port, _rs_token())
+        _roomscan_started = True
+        print("[diag] roomscan listening on %s://0.0.0.0:%d" % (scheme, port))
+        return dict(_roomscan_state)
+
+
+# --- voice-facing entry points ---------------------------------------------
+def open_roomscan():
+    """Open the RoomScan console on this PC and bring the phone scanner up.
+    The console shows the QR code / URL the phone opens, and renders every
+    saved room in 3D. Returns a short status string for the brain."""
+    files_dir = Path(__file__).resolve().parent
+    if not (files_dir / "roomscan.html").exists():
+        return "The RoomScan phone page is missing, sir. Expected at: %s" \
+               % (files_dir / "roomscan.html")
+    info = _start_roomscan_server()
+    if not _ensure_worldview_server(files_dir, port=7777):
+        return "Failed to start the local server, sir. Try restarting me."
+    url = "http://localhost:7777/roomview.html?t=" + str(int(time.time()))
+    for exe in (r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe",
+                r"C:\Program Files\Microsoft\Edge\Application\msedge.exe"):
+        if os.path.exists(exe):
+            try:
+                subprocess.Popen([exe, "--app=" + url], close_fds=True)
+                break
+            except Exception as e:
+                print("[diag] Edge --app launch failed, falling back:", repr(e))
+                webbrowser.open(url)
+                break
+    else:
+        try:
+            webbrowser.open(url)
+        except Exception as e:
+            return "Failed to open the RoomScan console: %s" % e
+    if info.get("error") and not info.get("https"):
+        return ("RoomScan is up, sir, but without a certificate the phone "
+                "camera will be blocked: %s" % info["error"])
+    return ("RoomScan is ready, sir. Scan the QR code on screen with your "
+            "phone - it points at %s." % (info.get("host") or "this PC"))
+
+
+def roomscan_status(lang="en"):
+    """Spoken/typed summary of the most recent scan."""
+    scans = _rs_index()
+    if not scans:
+        return ("עוד לא סרקת אף חדר, אדוני. תגיד 'סרוק חדר' ואפתח את הסורק."
+                if lang == "he" else
+                "No rooms scanned yet, sir. Say 'scan a room' and I'll open the scanner.")
+    s = scans[0]
+    if lang == "he":
+        lines = ["הסריקה האחרונה: %s - %.2f מ\"ר, גובה תקרה %.2f מ', %d פינות."
+                 % (s["name"], s["area_m2"], s["ceiling_m"], s["corners"])]
+        if len(scans) > 1:
+            lines.append("סה\"כ %d חדרים סרוקים." % len(scans))
+        return " ".join(lines)
+    lines = ["Last scan: %s - %.2f m2, ceiling %.2f m, %d corners."
+             % (s["name"], s["area_m2"], s["ceiling_m"], s["corners"])]
+    if len(scans) > 1:
+        lines.append("%d rooms scanned in total." % len(scans))
+    return " ".join(lines)
+
+
+def _roomscan_intercept(msg):
+    """Deterministic voice routing. Returns 'open', 'status' or None.
+    An open/show verb is required so 'how big is the living room' still goes
+    to the model rather than popping a window."""
+    if not msg or not isinstance(msg, str):
+        return None
+    low = msg.lower()
+    subj = r"(room\s?scan|roomscan|סורק החדרים|סורק חדרים|סריקת חדר|סריקת חדרים|" \
+           r"scan (?:the |my )?room|סרוק (?:את )?ה?חדר|תסרוק (?:את )?ה?חדר|" \
+           r"3d (?:model of|scan of) (?:the |my )?room|מודל תלת ?מימד של ה?חדר)"
+    if re.search(subj, low):
+        if re.search(r"(מה|כמה|גודל|status|how (?:big|large)|last scan|"
+                     r"הסריקה האחרונה|כמה חדרים)", low):
+            return "status"
+        return "open"
+    if re.search(r"(פתח|תפתח|open|show|launch|תעלה|תציג)[^.!?]{0,24}"
+                 r"(סורק|scanner|תוכנית קומה|floor plan)", low):
+        return "open"
+    return None
+
 
 # --- Google Places + Directions ---------------------------------------------
 def _gmaps_get(url, params, timeout=12):
@@ -3445,6 +4733,31 @@ LOCAL_TOOLS = [
                       "description": "core = black hole, solar = solar system, todo = task list"}
         }},
     },
+    {
+        "name": "open_roomscan",
+        "description": ("Open RoomScan - the phone-camera room scanner. Shows "
+                        "a QR code the user scans with their phone; the phone "
+                        "then measures the room through its camera and motion "
+                        "sensors (or WebXR AR when the phone supports it) and "
+                        "sends back a 3D model, a dimensioned floor plan and "
+                        "the room's area, perimeter and ceiling height. Use "
+                        "when the user asks to scan or measure a room, to "
+                        "build a 3D model of a room, or to open the room "
+                        "scanner / floor plan console. Hebrew triggers include "
+                        "'סרוק את החדר', 'תמדוד לי את הסלון', 'תבנה מודל "
+                        "תלת מימד של החדר', 'פתח את סורק החדרים'."),
+        "input_schema": {"type": "object", "properties": {}},
+    },
+    {
+        "name": "roomscan_status",
+        "description": ("Report the most recently scanned room - its area, "
+                        "ceiling height and corner count - and how many rooms "
+                        "have been scanned in total. Use when the user asks "
+                        "about the last scan or how big a scanned room is "
+                        "('מה גודל הסלון שסרקתי', 'what was the last room "
+                        "scan')."),
+        "input_schema": {"type": "object", "properties": {}},
+    },
 ]
 
 def run_local_tool(name, tool_input):
@@ -3516,6 +4829,11 @@ def run_local_tool(name, tool_input):
         return open_achilles(tool_input.get("scene", "core"))
     if name == "open_roadmap":
         return open_roadmap()
+    if name == "open_roomscan":
+        return open_roomscan()
+    if name == "roomscan_status":
+        return roomscan_status(
+            "he" if globals().get("_last_timer_lang") == "he" else "en")
     if name == "open_search_panel":
         if APP is not None:
             APP.ui(APP.open_panel)
@@ -3761,6 +5079,21 @@ def system_health(lang="en"):
             facts.append("WorldView file: WARN (worldview.html missing)")
     except Exception as e:
         facts.append("WorldView file: WARN (%s)" % e)
+
+    # RoomScan files
+    try:
+        _rsdir = Path(__file__).resolve().parent
+        _missing = [f for f in ("roomscan.html", "roomview.html")
+                    if not (_rsdir / f).exists()]
+        if _missing:
+            facts.append("RoomScan files: WARN (missing %s)" % ", ".join(_missing))
+        elif _roomscan_started and not _roomscan_state.get("https"):
+            facts.append("RoomScan: WARN (no TLS - phone camera will be blocked: %s)"
+                         % (_roomscan_state.get("error") or "unknown"))
+        else:
+            facts.append("RoomScan files: OK (%d scans saved)" % len(_rs_scan_dirs()))
+    except Exception as e:
+        facts.append("RoomScan files: WARN (%s)" % e)
 
     # Knowledge folder
     try:
@@ -6129,6 +7462,13 @@ def think(user_message, memory, lang=""):
     # v4.52: deterministic Achilles-screen intercepts. An open/show verb is
     # required so knowledge questions ("what IS a black hole") still go to
     # the model instead of popping a window.
+    # v4.68: RoomScan. 'scan the room' must never be answered from memory -
+    # it has to actually bring the scanner up.
+    _rsi = _roomscan_intercept(user_message)
+    if _rsi == "open":
+        return open_roomscan()
+    if _rsi == "status":
+        return roomscan_status("he" if lang == "he" or is_hebrew(user_message) else "en")
     _low = user_message.lower()
     if re.search(r"(פתח|תפתח|open|show|launch|bring up|תעלה|תציג)[^.!?]{0,24}(black\s?hole|חור שחור|achilles|אכילס)", _low) \
        or re.search(r"(black\s?hole|חור שחור)[^.!?]{0,12}(screen|window|מסך|חלון)", _low):
@@ -6211,7 +7551,8 @@ def think(user_message, memory, lang=""):
                                 "spotify_previous", "spotify_volume", "spotify_now_playing",
                                 "learn_topic", "deep_learn_domain", "resume_learning",
                                 "learning_status", "open_search_panel", "open_worldview",
-                                "open_achilles", "open_roadmap"):
+                                "open_achilles", "open_roadmap",
+                                "open_roomscan", "roomscan_status"):
                             out = run_local_tool(block.name, block.input or {})
                             tool_results.append({
                                 "type": "tool_result",

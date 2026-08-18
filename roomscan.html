@@ -1,0 +1,1414 @@
+<!DOCTYPE html>
+<html lang="he" dir="rtl">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover" />
+<meta name="theme-color" content="#0a0c10" />
+<meta name="mobile-web-app-capable" content="yes" />
+<meta name="apple-mobile-web-app-capable" content="yes" />
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+<title>ACHILLES · RoomScan</title>
+<style>
+  :root{ --amber:#ff8c42; --amber2:#ffa55f; --ink:#0a0c10; --panel:rgba(12,15,20,.88);
+         --text:#e6edf3; --muted:#8b97a5; --divider:#222a35; --good:#46e0d6;
+         --warn:#ffd166; --bad:#ff5d5d;
+         --safe-t:env(safe-area-inset-top,0px); --safe-b:env(safe-area-inset-bottom,0px); }
+  *{box-sizing:border-box;-webkit-tap-highlight-color:transparent;}
+  html,body{margin:0;height:100%;background:var(--ink);color:var(--text);overflow:hidden;
+            font-family:"Segoe UI",system-ui,-apple-system,Arial,sans-serif;
+            overscroll-behavior:none;touch-action:manipulation;}
+  #cam{position:fixed;inset:0;width:100%;height:100%;object-fit:cover;background:#000;z-index:0;}
+  #ovl{position:fixed;inset:0;z-index:1;pointer-events:none;}
+
+  /* ---- top HUD ---- */
+  #hud{position:fixed;top:calc(var(--safe-t) + 8px);inset-inline:8px;z-index:4;
+       background:var(--panel);border:1px solid var(--divider);border-radius:14px;
+       padding:9px 12px;backdrop-filter:blur(8px);display:flex;gap:10px;align-items:center;}
+  #hud .brand{color:var(--amber);font-weight:700;letter-spacing:.08em;font-size:12px;white-space:nowrap;}
+  #hud .grow{flex:1;min-width:0;}
+  #hud .stat{font-size:11px;color:var(--muted);line-height:1.5;}
+  #hud .stat b{color:var(--text);font-weight:600;}
+  .chip{border:1px solid var(--divider);border-radius:999px;padding:4px 9px;font-size:11px;
+        color:var(--muted);background:rgba(0,0,0,.35);cursor:pointer;white-space:nowrap;}
+  .chip.on{border-color:var(--amber);color:var(--amber);}
+
+  /* ---- live readout by the crosshair ---- */
+  #read{position:fixed;top:50%;left:50%;transform:translate(-50%,26px);z-index:3;
+        background:rgba(0,0,0,.55);border-radius:10px;padding:5px 10px;font-size:13px;
+        font-family:Consolas,monospace;color:var(--good);pointer-events:none;
+        white-space:nowrap;backdrop-filter:blur(3px);}
+  #read.bad{color:var(--bad);}
+  #read.warn{color:var(--warn);}
+
+  /* ---- mini floor plan ---- */
+  #plan{position:fixed;bottom:calc(var(--safe-b) + 96px);inset-inline-start:10px;z-index:4;
+        width:132px;height:132px;background:var(--panel);border:1px solid var(--divider);
+        border-radius:12px;backdrop-filter:blur(6px);overflow:hidden;}
+  #plan canvas{width:100%;height:100%;display:block;}
+  #plan .lbl{position:absolute;top:4px;inset-inline-start:8px;font-size:10px;color:var(--muted);}
+
+  /* ---- action bar ---- */
+  #bar{position:fixed;bottom:calc(var(--safe-b) + 8px);inset-inline:8px;z-index:5;
+       display:flex;gap:7px;flex-wrap:wrap;justify-content:center;}
+  .btn{flex:1 1 auto;min-width:88px;background:var(--panel);border:1px solid var(--divider);
+       border-radius:13px;color:var(--text);padding:13px 10px;font-size:14px;font-weight:600;
+       cursor:pointer;backdrop-filter:blur(8px);text-align:center;transition:.12s;user-select:none;}
+  .btn:active{transform:scale(.96);}
+  .btn.primary{background:linear-gradient(180deg,#ff9a52,#ef7326);border-color:#ff8c42;color:#141414;}
+  .btn.ghost{flex:0 0 auto;min-width:0;padding:13px 14px;font-size:13px;color:var(--muted);}
+  .btn[disabled]{opacity:.38;pointer-events:none;}
+
+  /* ---- sheets ---- */
+  #sheet{position:fixed;inset:0;z-index:9;background:rgba(6,8,11,.94);backdrop-filter:blur(10px);
+         overflow-y:auto;padding:calc(var(--safe-t) + 18px) 18px calc(var(--safe-b) + 24px);
+         display:none;}
+  #sheet.show{display:block;}
+  .card{max-width:520px;margin:0 auto 14px;background:#101419;border:1px solid var(--divider);
+        border-radius:16px;padding:16px;}
+  .card h2{margin:0 0 4px;font-size:18px;color:var(--amber);}
+  .card h3{margin:16px 0 6px;font-size:14px;color:var(--text);}
+  .card p{margin:6px 0;font-size:13px;color:var(--muted);line-height:1.65;}
+  .row{display:flex;gap:10px;align-items:center;margin:10px 0;}
+  .row label{flex:0 0 106px;font-size:13px;color:var(--muted);}
+  input[type=text],input[type=number],select{flex:1;background:#0a0d12;border:1px solid var(--divider);
+        border-radius:10px;color:var(--text);padding:11px 12px;font-size:16px;font-family:inherit;
+        min-width:0;}
+  input[type=range]{flex:1;accent-color:var(--amber);}
+  .val{font-family:Consolas,monospace;color:var(--amber2);font-size:14px;min-width:56px;text-align:center;}
+  table{width:100%;border-collapse:collapse;font-size:13px;margin-top:6px;}
+  td,th{padding:6px 4px;border-bottom:1px solid var(--divider);text-align:start;}
+  th{color:var(--muted);font-weight:600;font-size:11.5px;text-transform:uppercase;letter-spacing:.05em;}
+  .pill{display:inline-block;border-radius:999px;padding:2px 9px;font-size:11px;
+        border:1px solid var(--divider);color:var(--muted);}
+  .pill.ok{border-color:var(--good);color:var(--good);}
+  .pill.no{border-color:var(--bad);color:var(--bad);}
+  #planBig{width:100%;height:auto;background:#0a0d12;border-radius:12px;border:1px solid var(--divider);
+           display:block;margin-top:8px;}
+  #toast{position:fixed;bottom:calc(var(--safe-b) + 78px);left:50%;transform:translateX(-50%);
+         z-index:20;background:#1a2029;border:1px solid var(--divider);border-radius:12px;
+         padding:11px 16px;font-size:14px;max-width:88vw;text-align:center;display:none;
+         box-shadow:0 8px 30px rgba(0,0,0,.6);}
+  #toast.show{display:block;}
+  #toast.err{border-color:var(--bad);color:#ffb4b4;}
+  #toast.ok{border-color:var(--good);color:#b9f4ef;}
+  .hide{display:none !important;}
+  #arOverlay{position:fixed;inset:0;z-index:30;display:none;pointer-events:none;}
+  #arOverlay.show{display:block;}
+  #arOverlay .bar{position:absolute;bottom:calc(var(--safe-b) + 12px);inset-inline:10px;
+                  display:flex;gap:8px;pointer-events:auto;}
+  #arOverlay .info{position:absolute;top:calc(var(--safe-t) + 12px);inset-inline:10px;
+                   background:var(--panel);border:1px solid var(--divider);border-radius:12px;
+                   padding:10px 12px;font-size:13px;pointer-events:auto;}
+</style>
+</head>
+<body>
+
+<video id="cam" playsinline muted autoplay></video>
+<canvas id="ovl"></canvas>
+
+<div id="hud" class="hide">
+  <div class="brand">ROOMSCAN</div>
+  <div class="grow"><div class="stat" id="stat">—</div></div>
+  <div class="chip" id="langChip">EN</div>
+  <div class="chip" id="menuChip">⋯</div>
+</div>
+
+<div id="read" class="hide">—</div>
+
+<div id="plan" class="hide">
+  <canvas id="planc"></canvas>
+  <div class="lbl" id="planLbl"></div>
+</div>
+
+<div id="bar" class="hide">
+  <div class="btn primary" id="bMark">סמן פינה</div>
+  <div class="btn" id="bClose">סגור חדר</div>
+  <div class="btn" id="bHeight">גובה תקרה</div>
+  <div class="btn" id="bOpen">דלת / חלון</div>
+  <div class="btn ghost" id="bUndo">↶</div>
+</div>
+
+<div id="arOverlay">
+  <div class="info" id="arInfo"></div>
+  <div class="bar">
+    <div class="btn primary" id="arMark">סמן פינה</div>
+    <div class="btn" id="arUndo">↶</div>
+    <div class="btn" id="arDone">סיום</div>
+  </div>
+</div>
+
+<div id="sheet" class="show"></div>
+<div id="toast"></div>
+
+<!-- ======================================================================
+     Geometry.  Kept DOM-free and inside this tagged block so
+     tests/test_roomscan_math.mjs can extract and unit-test it in node.
+     ====================================================================== -->
+<script id="rs-math">
+/* ==========================================================================
+   RoomScan geometry - phone side.  Kept free of DOM/browser calls so the
+   node test harness (tests/test_roomscan_math.mjs) can exercise it directly.
+
+   World frame (W3C DeviceOrientation "Earth" frame): X east, Y north, Z up.
+   Device frame: X right along the screen, Y up along the screen, Z out of the
+   screen - so the REAR camera looks along device -Z.
+   ========================================================================== */
+var RS = (function () {
+  var D2R = Math.PI / 180, R2D = 180 / Math.PI;
+
+  /* Rotation device -> world for the W3C alpha/beta/gamma (intrinsic Z-X'-Y'').
+     Row-major 3x3 as a flat array of 9. */
+  function rotMatrix(alphaDeg, betaDeg, gammaDeg) {
+    var a = (alphaDeg || 0) * D2R, b = (betaDeg || 0) * D2R, g = (gammaDeg || 0) * D2R;
+    var cA = Math.cos(a), sA = Math.sin(a);
+    var cB = Math.cos(b), sB = Math.sin(b);
+    var cG = Math.cos(g), sG = Math.sin(g);
+    return [
+      cA * cG - sA * sB * sG, -cB * sA, cA * sG + cG * sA * sB,
+      cG * sA + cA * sB * sG, cA * cB, sA * sG - cA * cG * sB,
+      -cB * sG, sB, cB * cG
+    ];
+  }
+
+  /* Where the rear camera points, in world coordinates: R * (0,0,-1).
+     Independent of screen orientation - the camera is bolted to the device,
+     so a landscape hold needs no correction here. */
+  function lookDir(R) {
+    var d = [-R[2], -R[5], -R[8]];
+    var n = Math.hypot(d[0], d[1], d[2]) || 1;
+    return [d[0] / n, d[1] / n, d[2] / n];
+  }
+
+  function dirFromOrientation(alpha, beta, gamma) {
+    return lookDir(rotMatrix(alpha, beta, gamma));
+  }
+
+  /* Ray from a phone held h metres above the floor, hitting the floor plane.
+     Returns null when the phone is not aimed downwards enough to be usable. */
+  function floorHit(dir, h, minDepressionDeg) {
+    var minD = (minDepressionDeg === undefined ? 4 : minDepressionDeg) * D2R;
+    var mh = Math.hypot(dir[0], dir[1]);
+    if (dir[2] >= 0) return null;                       // aimed level or up
+    var depression = Math.atan2(-dir[2], mh);           // 0 = level, pi/2 = straight down
+    if (depression < minD) return null;                 // grazing - unusable
+    var t = h / -dir[2];
+    return {
+      x: t * dir[0], y: t * dir[1],
+      dist: t * mh,                                     // horizontal distance
+      range: t,                                         // slant range
+      depressionDeg: depression * R2D
+    };
+  }
+
+  /* Height of whatever the phone is aimed at, when it sits at known
+     horizontal distance r (e.g. the ceiling corner above a measured corner). */
+  function heightAt(dir, r, h) {
+    var mh = Math.hypot(dir[0], dir[1]);
+    if (mh < 1e-6) return null;                         // straight up/down: no r
+    return h + r * (dir[2] / mh);
+  }
+
+  /* Phone height from two shots at an object of known height (a door):
+     one at its base, one at its top.  Removes the "guess your own height"
+     error, which is the single biggest bias in sensor mode. */
+  function heightFromReference(dirBottom, dirTop, refHeight) {
+    var mb = Math.hypot(dirBottom[0], dirBottom[1]);
+    var mt = Math.hypot(dirTop[0], dirTop[1]);
+    if (dirBottom[2] >= 0 || dirTop[2] <= 0 || mb < 1e-6 || mt < 1e-6) return null;
+    var k = (mb * dirTop[2]) / (-dirBottom[2] * mt);    // rise above phone / phone height
+    var h = refHeight / (1 + k);
+    if (!isFinite(h) || h <= 0.05 || h >= 3.0) return null;
+    return h;
+  }
+
+  /* Mean of unit direction samples + how much they wandered, in degrees.
+     Used to reject a shot taken while the phone was still moving. */
+  function averageDir(dirs) {
+    if (!dirs || !dirs.length) return null;
+    var s = [0, 0, 0], i, k;
+    for (i = 0; i < dirs.length; i++)
+      for (k = 0; k < 3; k++) s[k] += dirs[i][k];
+    var n = Math.hypot(s[0], s[1], s[2]);
+    if (n < 1e-9) return null;
+    var m = [s[0] / n, s[1] / n, s[2] / n];
+    var worst = 0;
+    for (i = 0; i < dirs.length; i++) {
+      var dot = Math.max(-1, Math.min(1, m[0] * dirs[i][0] + m[1] * dirs[i][1] + m[2] * dirs[i][2]));
+      worst = Math.max(worst, Math.acos(dot) * R2D);
+    }
+    return { dir: m, spreadDeg: worst };
+  }
+
+  /* Honest 1-sigma error on a floor shot: d(distance)/d(angle) is
+     (D^2 + h^2)/h, so error grows with the SQUARE of the distance. */
+  function shotError(dist, h, sigmaDeg) {
+    var s = (sigmaDeg === undefined ? 1.5 : sigmaDeg) * D2R;
+    return s * (dist * dist + h * h) / Math.max(0.2, h);
+  }
+
+  /* --- polygons --------------------------------------------------------- */
+  function polyArea(pts) {                              // signed, + = CCW
+    var a = 0, n = pts.length, i;
+    for (i = 0; i < n; i++) {
+      var p = pts[i], q = pts[(i + 1) % n];
+      a += p[0] * q[1] - q[0] * p[1];
+    }
+    return a / 2;
+  }
+
+  function polyPerimeter(pts) {
+    var s = 0, n = pts.length, i;
+    for (i = 0; i < n; i++) {
+      var p = pts[i], q = pts[(i + 1) % n];
+      s += Math.hypot(q[0] - p[0], q[1] - p[1]);
+    }
+    return s;
+  }
+
+  function ensureCCW(pts) {
+    return polyArea(pts) >= 0 ? pts.slice() : pts.slice().reverse();
+  }
+
+  /* --- station linking (2D Procrustes) ---------------------------------- *
+     The phone can only see part of a real room from one spot.  Move to a new
+     spot, re-shoot >= 2 corners you already have, and this recovers the
+     rotation + translation that maps the new station's local measurements
+     into the model.  Absolute compass accuracy never enters: only the yaw
+     DIFFERENCE within a single station matters, and this fit absorbs the
+     offset between stations. */
+  function fitStations(localPts, modelPts) {
+    var n = Math.min(localPts.length, modelPts.length), i;
+    if (n < 2) return null;
+    var cl = [0, 0], cm = [0, 0];
+    for (i = 0; i < n; i++) {
+      cl[0] += localPts[i][0]; cl[1] += localPts[i][1];
+      cm[0] += modelPts[i][0]; cm[1] += modelPts[i][1];
+    }
+    cl = [cl[0] / n, cl[1] / n];
+    cm = [cm[0] / n, cm[1] / n];
+    var num = 0, den = 0, sl = 0, sm = 0;
+    for (i = 0; i < n; i++) {
+      var lx = localPts[i][0] - cl[0], ly = localPts[i][1] - cl[1];
+      var mx = modelPts[i][0] - cm[0], my = modelPts[i][1] - cm[1];
+      num += lx * my - ly * mx;
+      den += lx * mx + ly * my;
+      sl += lx * lx + ly * ly;
+      sm += mx * mx + my * my;
+    }
+    if (sl < 1e-9) return null;
+    var th = Math.atan2(num, den);
+    var c = Math.cos(th), s = Math.sin(th);
+    var fit = {
+      rot: th,
+      tx: cm[0] - (c * cl[0] - s * cl[1]),
+      ty: cm[1] - (s * cl[0] + c * cl[1]),
+      scale: Math.sqrt(sm / sl),                        // 1.0 if both stations agree
+      rms: 0
+    };
+    var e = 0;
+    for (i = 0; i < n; i++) {
+      var p = applyFit(fit, localPts[i]);
+      e += Math.pow(p[0] - modelPts[i][0], 2) + Math.pow(p[1] - modelPts[i][1], 2);
+    }
+    fit.rms = Math.sqrt(e / n);
+    return fit;
+  }
+
+  function applyFit(fit, p) {
+    if (!fit) return [p[0], p[1]];
+    var c = Math.cos(fit.rot), s = Math.sin(fit.rot);
+    return [c * p[0] - s * p[1] + fit.tx, s * p[0] + c * p[1] + fit.ty];
+  }
+
+  /* --- regularisation --------------------------------------------------- *
+     Rooms are overwhelmingly rectilinear, and a 1.5 deg sensor wobble shows up
+     as walls that are 3 deg off square.  Find the dominant wall direction
+     (circular mean over 4*theta, so all four right angles vote together),
+     snap every wall that is within tolerance, then rebuild each corner as the
+     intersection of its two adjacent wall lines. */
+  function regularize(pts, tolDeg) {
+    var n = pts.length;
+    if (n < 3) return { points: pts.slice(), snapped: [], theta0: 0, changed: 0 };
+    var tol = (tolDeg === undefined ? 8 : tolDeg) * D2R;
+    var i, C = 0, S = 0, dirs = [], mids = [], lens = [];
+    for (i = 0; i < n; i++) {
+      var a = pts[i], b = pts[(i + 1) % n];
+      var dx = b[0] - a[0], dy = b[1] - a[1];
+      var L = Math.hypot(dx, dy);
+      lens.push(L);
+      mids.push([(a[0] + b[0]) / 2, (a[1] + b[1]) / 2]);
+      if (L < 1e-9) { dirs.push([1, 0]); continue; }
+      dirs.push([dx / L, dy / L]);
+      var phi = Math.atan2(dy, dx);
+      C += L * Math.cos(4 * phi);
+      S += L * Math.sin(4 * phi);
+    }
+    var theta0 = Math.atan2(S, C) / 4;
+
+    var snapped = [], newDirs = [], changed = 0;
+    for (i = 0; i < n; i++) {
+      if (lens[i] < 1e-9) { snapped.push(false); newDirs.push(dirs[i]); continue; }
+      var phi = Math.atan2(dirs[i][1], dirs[i][0]);
+      var k = Math.round((phi - theta0) / (Math.PI / 2));
+      var target = theta0 + k * (Math.PI / 2);
+      var diff = Math.atan2(Math.sin(phi - target), Math.cos(phi - target));
+      if (Math.abs(diff) <= tol) {
+        newDirs.push([Math.cos(target), Math.sin(target)]);
+        snapped.push(true);
+        if (Math.abs(diff) > 1e-9) changed++;
+      } else {
+        newDirs.push(dirs[i]);
+        snapped.push(false);
+      }
+    }
+
+    // corner i = intersection of wall (i-1) and wall i
+    var out = [];
+    for (i = 0; i < n; i++) {
+      var j = (i - 1 + n) % n;
+      var u = newDirs[j], v = newDirs[i];
+      var cross = u[0] * v[1] - u[1] * v[0];
+      if (Math.abs(cross) < 0.05) { out.push([pts[i][0], pts[i][1]]); continue; }
+      var wx = mids[i][0] - mids[j][0], wy = mids[i][1] - mids[j][1];
+      var s = (wx * v[1] - wy * v[0]) / cross;
+      out.push([mids[j][0] + u[0] * s, mids[j][1] + u[1] * s]);
+    }
+    return { points: out, snapped: snapped, theta0: theta0, changed: changed };
+  }
+
+  /* Rotate + translate the finished room so wall 0 lies along +X starting at
+     the origin - a tidy, reproducible model frame regardless of compass. */
+  function normalizeFrame(pts) {
+    if (pts.length < 2) return pts.slice();
+    var a = pts[0], b = pts[1];
+    var th = -Math.atan2(b[1] - a[1], b[0] - a[0]);
+    var c = Math.cos(th), s = Math.sin(th);
+    return pts.map(function (p) {
+      var x = p[0] - a[0], y = p[1] - a[1];
+      return [c * x - s * y, s * x + c * y];
+    });
+  }
+
+  /* Project a point onto wall i, returning the along-wall coordinate u.
+     Used to place a door/window on the wall it was shot against. */
+  function projectOnWall(pts, i, p) {
+    var n = pts.length;
+    var a = pts[i], b = pts[(i + 1) % n];
+    var dx = b[0] - a[0], dy = b[1] - a[1];
+    var L = Math.hypot(dx, dy);
+    if (L < 1e-9) return { u: 0, len: 0, off: 0 };
+    var u = ((p[0] - a[0]) * dx + (p[1] - a[1]) * dy) / L;
+    var off = ((p[0] - a[0]) * -dy + (p[1] - a[1]) * dx) / L;
+    return { u: Math.max(0, Math.min(L, u)), len: L, off: off };
+  }
+
+  /* Which wall is a floor point closest to? (for auto-assigning openings) */
+  function nearestWall(pts, p) {
+    var best = -1, bestD = Infinity, n = pts.length, i;
+    for (i = 0; i < n; i++) {
+      var pr = projectOnWall(pts, i, p);
+      var a = pts[i], b = pts[(i + 1) % n];
+      var L = Math.hypot(b[0] - a[0], b[1] - a[1]);
+      if (L < 1e-9) continue;
+      var qx = a[0] + (b[0] - a[0]) * pr.u / L, qy = a[1] + (b[1] - a[1]) * pr.u / L;
+      var d = Math.hypot(p[0] - qx, p[1] - qy);
+      if (d < bestD) { bestD = d; best = i; }
+    }
+    return { wall: best, dist: bestD };
+  }
+
+  return {
+    rotMatrix: rotMatrix, lookDir: lookDir, dirFromOrientation: dirFromOrientation,
+    floorHit: floorHit, heightAt: heightAt, heightFromReference: heightFromReference,
+    averageDir: averageDir, shotError: shotError,
+    polyArea: polyArea, polyPerimeter: polyPerimeter, ensureCCW: ensureCCW,
+    fitStations: fitStations, applyFit: applyFit,
+    regularize: regularize, normalizeFrame: normalizeFrame,
+    projectOnWall: projectOnWall, nearestWall: nearestWall
+  };
+})();
+
+if (typeof module !== "undefined" && module.exports) module.exports = RS;
+</script>
+
+<script>
+"use strict";
+/* ==========================================================================
+   RoomScan capture app.
+   Three ways to get a room, best first, each falling back to the next:
+     ar      - WebXR immersive-ar hit-test.  True 6DoF, ~2 cm, Android/Chrome.
+     sensor  - camera + orientation sensors.  Any phone.  ~5-20 cm depending
+               on how steady you are and how far the corner is.
+     manual  - type the dimensions.  Always available, even with no sensors.
+   ========================================================================== */
+
+var Q = new URLSearchParams(location.search);
+var TOKEN = Q.get("k") || "";
+var API = location.origin;
+
+var T = {
+  he: {
+    title: "סורק חדרים", start: "התחל סריקה", lang: "EN",
+    setup: "הגדרות סריקה", roomName: "שם החדר", phoneH: "גובה הטלפון",
+    mode: "שיטת מדידה", modeAr: "AR מדויק", modeSensor: "חיישנים", modeManual: "ידני",
+    calib: "כיול לפי דלת", calibHelp: "כוון לתחתית משקוף הדלת ולחץ, ואז לחלקו העליון. מדויק יותר מלנחש את גובה היד.",
+    go: "התחל", mark: "סמן פינה", closeRoom: "סגור חדר", height: "גובה תקרה",
+    opening: "דלת / חלון", undo: "בטל", newStation: "עמדה חדשה", done: "סיום",
+    aimFloor: "כוון לפינה שבין הקיר לרצפה", corners: "פינות", area: "שטח",
+    tooFlat: "מכוון גבוה מדי — הורד את הטלפון לכיוון הרצפה",
+    shaky: "הטלפון זז — החזק יציב ונסה שוב", need3: "צריך לפחות 3 פינות",
+    saved: "נשמר", sendFail: "השליחה נכשלה", sending: "שולח…",
+    review: "סיכום הסריקה", perim: "היקף", ceil: "גובה תקרה", vol: "נפח",
+    send: "שלח ל-JARVIS", again: "סרוק שוב", download: "הורד קובץ",
+    walls: "קירות", wall: "קיר", len: "אורך", accuracy: "דיוק משוער",
+    steady: "יציבות", dist: "מרחק", noCam: "אין גישה למצלמה",
+    noSensor: "אין גישה לחיישני התנועה", needHttps: "צריך חיבור מאובטח (HTTPS)",
+    openingWhich: "מה סימנת?", door: "דלת", window: "חלון",
+    openStep1: "כוון לתחתית הדלת/חלון בצד אחד ולחץ",
+    openStep2: "עכשיו לצד השני", openStep3: "עכשיו לחלק העליון",
+    heightStep: "כוון לפינה שבין הקיר לתקרה מעל הפינה האחרונה",
+    stationStep: "צלם מחדש 2 פינות שכבר סימנת, לפי הסדר",
+    pickCorner: "בחר פינה מוכרת", cancel: "ביטול", square: "יישר לזוויות ישרות",
+    photo: "צלם תמונה", menu: "תפריט", back: "חזור",
+    manualW: "רוחב", manualD: "אורך", manualH: "גובה", build: "בנה חדר",
+    linked: "העמדות חוברו", linkFail: "החיבור נכשל — נסה פינות רחוקות יותר זו מזו",
+    tips: "טיפים לדיוק", tip1: "עמוד במרכז החדר — טעות גדלה עם ריבוע המרחק.",
+    tip2: "החזק את הטלפון יציב חצי שנייה לפני כל לחיצה.",
+    tip3: "סמן את הפינות לפי הסדר, סביב החדר, בלי לדלג.",
+    tip4: "השתמש בכיול הדלת — ניחוש גובה היד הוא מקור הטעות הגדול ביותר.",
+  },
+  en: {
+    title: "RoomScan", start: "Start scan", lang: "עב",
+    setup: "Scan setup", roomName: "Room name", phoneH: "Phone height",
+    mode: "Method", modeAr: "AR (precise)", modeSensor: "Sensors", modeManual: "Manual",
+    calib: "Calibrate on a door", calibHelp: "Aim at the bottom of the door frame and tap, then at the top. More accurate than guessing how high you hold the phone.",
+    go: "Start", mark: "Mark corner", closeRoom: "Close room", height: "Ceiling height",
+    opening: "Door / window", undo: "Undo", newStation: "New station", done: "Done",
+    aimFloor: "Aim at the wall-floor corner", corners: "corners", area: "area",
+    tooFlat: "Aiming too high — tilt down towards the floor",
+    shaky: "Phone moved — hold steady and try again", need3: "At least 3 corners needed",
+    saved: "Saved", sendFail: "Upload failed", sending: "Sending…",
+    review: "Scan summary", perim: "Perimeter", ceil: "Ceiling", vol: "Volume",
+    send: "Send to JARVIS", again: "Scan again", download: "Download file",
+    walls: "Walls", wall: "Wall", len: "Length", accuracy: "Est. accuracy",
+    steady: "Steady", dist: "Distance", noCam: "No camera access",
+    noSensor: "No motion sensor access", needHttps: "A secure (HTTPS) connection is required",
+    openingWhich: "What did you mark?", door: "Door", window: "Window",
+    openStep1: "Aim at the bottom of one side and tap",
+    openStep2: "Now the other side", openStep3: "Now the top edge",
+    heightStep: "Aim at the wall-ceiling corner above the last corner",
+    stationStep: "Re-shoot 2 corners you already marked, in order",
+    pickCorner: "Pick a known corner", cancel: "Cancel", square: "Square up",
+    photo: "Photo", menu: "Menu", back: "Back",
+    manualW: "Width", manualD: "Depth", manualH: "Height", build: "Build room",
+    linked: "Stations linked", linkFail: "Link failed — try corners further apart",
+    tips: "Accuracy tips", tip1: "Stand near the middle — error grows with the SQUARE of distance.",
+    tip2: "Hold the phone still for half a second before each tap.",
+    tip3: "Mark corners in order, around the room, without skipping.",
+    tip4: "Use the door calibration — guessing your hand height is the biggest error source.",
+  }
+};
+var lang = (navigator.language || "en").indexOf("he") === 0 ? "he" : "en";
+function t(k) { return (T[lang] && T[lang][k]) || T.en[k] || k; }
+
+/* ---------------------------------------------------------------- state */
+var S = {
+  mode: "sensor",
+  name: "",
+  phoneH: 1.45,
+  corners: [],          // model-frame [x, y]
+  ceiling: 2.6,
+  ceilingMeasured: false,
+  openings: [],
+  stations: [{ x: 0, y: 0, h: 1.45, rms: 0 }],
+  fit: null,            // active station -> model transform
+  stationLocal: [],     // this station's raw local shots (for the link fit)
+  pending: null,        // multi-tap flow in progress
+  closed: false,
+  photos: [],
+  sigma: 1.5,
+  supports: { cam: false, orient: false, ar: false, secure: false }
+};
+
+var els = {};
+["cam","ovl","hud","stat","read","plan","planc","planLbl","bar","sheet","toast",
+ "bMark","bClose","bHeight","bOpen","bUndo","langChip","menuChip",
+ "arOverlay","arInfo","arMark","arUndo","arDone"].forEach(function (id) {
+  els[id] = document.getElementById(id);
+});
+
+function toast(msg, kind, ms) {
+  els.toast.textContent = msg;
+  els.toast.className = "show " + (kind || "");
+  clearTimeout(toast._t);
+  toast._t = setTimeout(function () { els.toast.className = ""; }, ms || 2600);
+}
+function vibrate(ms) { try { navigator.vibrate && navigator.vibrate(ms || 18); } catch (e) {} }
+
+/* ------------------------------------------------- orientation sampling */
+var oriBuf = [];                       // {t, dir}
+var lastOri = null;
+function onOri(e) {
+  if (e.alpha === null && e.beta === null && e.gamma === null) return;
+  S.supports.orient = true;
+  var dir = RS.dirFromOrientation(e.alpha || 0, e.beta || 0, e.gamma || 0);
+  lastOri = dir;
+  var now = performance.now();
+  oriBuf.push({ t: now, dir: dir });
+  while (oriBuf.length && now - oriBuf[0].t > 900) oriBuf.shift();
+}
+
+/* Average the last `ms` of samples; returns {dir, spreadDeg} or null. */
+function steadyDir(ms) {
+  var now = performance.now();
+  var dirs = oriBuf.filter(function (s) { return now - s.t <= (ms || 420); })
+                   .map(function (s) { return s.dir; });
+  if (dirs.length < 3 && lastOri) return { dir: lastOri, spreadDeg: 0, thin: true };
+  return RS.averageDir(dirs);
+}
+
+/* ------------------------------------------------------------ permissions */
+async function requestSensors() {
+  var DOE = window.DeviceOrientationEvent;
+  if (DOE && typeof DOE.requestPermission === "function") {   // iOS 13+
+    try {
+      var r = await DOE.requestPermission();
+      if (r !== "granted") return false;
+    } catch (e) { return false; }
+  }
+  window.addEventListener("deviceorientation", onOri, true);
+  // absolute events (Android) are steadier for yaw when available
+  window.addEventListener("deviceorientationabsolute", onOri, true);
+  return new Promise(function (res) {
+    var tries = 0;
+    var iv = setInterval(function () {
+      if (S.supports.orient || ++tries > 12) { clearInterval(iv); res(S.supports.orient); }
+    }, 120);
+  });
+}
+
+async function startCamera() {
+  try {
+    var stream = await navigator.mediaDevices.getUserMedia({
+      video: { facingMode: { ideal: "environment" }, width: { ideal: 1920 } },
+      audio: false
+    });
+    els.cam.srcObject = stream;
+    await els.cam.play().catch(function () {});
+    S.supports.cam = true;
+    return true;
+  } catch (e) {
+    S.supports.cam = false;
+    return false;
+  }
+}
+
+/* ------------------------------------------------------------- overlay */
+function fitCanvas(c) {
+  var r = c.getBoundingClientRect();
+  var dpr = Math.min(2, window.devicePixelRatio || 1);
+  if (c.width !== Math.round(r.width * dpr) || c.height !== Math.round(r.height * dpr)) {
+    c.width = Math.round(r.width * dpr);
+    c.height = Math.round(r.height * dpr);
+  }
+  var ctx = c.getContext("2d");
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  return { ctx: ctx, w: r.width, h: r.height };
+}
+
+function drawOverlay() {
+  var f = fitCanvas(els.ovl), ctx = f.ctx, cx = f.w / 2, cy = f.h / 2;
+  ctx.clearRect(0, 0, f.w, f.h);
+  var hit = currentHit();
+  var col = hit ? "#46e0d6" : "#ff5d5d";
+  ctx.strokeStyle = col; ctx.lineWidth = 2; ctx.globalAlpha = .95;
+  ctx.beginPath();
+  ctx.moveTo(cx - 24, cy); ctx.lineTo(cx - 7, cy);
+  ctx.moveTo(cx + 7, cy); ctx.lineTo(cx + 24, cy);
+  ctx.moveTo(cx, cy - 24); ctx.lineTo(cx, cy - 7);
+  ctx.moveTo(cx, cy + 7); ctx.lineTo(cx, cy + 24);
+  ctx.stroke();
+  ctx.beginPath(); ctx.arc(cx, cy, 3.2, 0, 6.284); ctx.fillStyle = col; ctx.fill();
+  ctx.globalAlpha = 1;
+}
+
+/* Current floor hit under the crosshair, in MODEL coordinates. */
+function currentHit() {
+  if (!lastOri) return null;
+  var h = RS.floorHit(lastOri, S.phoneH);
+  if (!h) return null;
+  var p = RS.applyFit(S.fit, [h.x, h.y]);
+  return { local: [h.x, h.y], model: p, dist: h.dist, depressionDeg: h.depressionDeg };
+}
+
+function updateRead() {
+  if (S.mode === "ar") return;
+  var hit = currentHit();
+  var sd = steadyDir();
+  if (!hit) {
+    els.read.className = "bad";
+    els.read.textContent = t("tooFlat");
+    return;
+  }
+  var err = RS.shotError(hit.dist, S.phoneH, S.sigma);
+  var spread = sd ? sd.spreadDeg : 9;
+  els.read.className = spread > 2.0 ? "warn" : "";
+  els.read.textContent = hit.dist.toFixed(2) + " m  ±" + (err * 100).toFixed(0) + " cm"
+    + (spread > 2.0 ? "  ⚠" : "");
+}
+
+function updateStat() {
+  var a = S.corners.length >= 3 ? Math.abs(RS.polyArea(S.corners)) : 0;
+  els.stat.innerHTML = "<b>" + S.corners.length + "</b> " + t("corners")
+    + (a ? " · <b>" + a.toFixed(2) + "</b> m²" : "")
+    + " · " + t("ceil") + " <b>" + S.ceiling.toFixed(2) + "</b> m";
+  if (S.corners.length >= 3) els.bClose.removeAttribute("disabled");
+  else els.bClose.setAttribute("disabled", "");
+  els.bUndo.style.opacity = S.corners.length ? "1" : ".38";
+}
+
+function drawPlan(canvas, pts, opts) {
+  opts = opts || {};
+  var f = fitCanvas(canvas), ctx = f.ctx, W = f.w, H = f.h;
+  ctx.clearRect(0, 0, W, H);
+  if (!pts.length) return;
+  var live = opts.live !== false ? currentHit() : null;
+  var all = pts.concat(live ? [live.model] : []);
+  var xs = all.map(function (p) { return p[0]; });
+  var ys = all.map(function (p) { return p[1]; });
+  var pad = 16 + (opts.pad || 0);
+  var minx = Math.min.apply(null, xs), maxx = Math.max.apply(null, xs);
+  var miny = Math.min.apply(null, ys), maxy = Math.max.apply(null, ys);
+  var sc = Math.min((W - pad * 2) / Math.max(0.4, maxx - minx),
+                    (H - pad * 2) / Math.max(0.4, maxy - miny));
+  var ox = (W - (maxx - minx) * sc) / 2 - minx * sc;
+  var oy = (H + (maxy - miny) * sc) / 2 + miny * sc;
+  var X = function (x) { return ox + x * sc; };
+  var Y = function (y) { return oy - y * sc; };
+
+  if (pts.length > 1) {
+    ctx.beginPath();
+    ctx.moveTo(X(pts[0][0]), Y(pts[0][1]));
+    for (var i = 1; i < pts.length; i++) ctx.lineTo(X(pts[i][0]), Y(pts[i][1]));
+    if (S.closed || opts.closed) ctx.closePath();
+    ctx.strokeStyle = "#ff8c42"; ctx.lineWidth = opts.thick || 2; ctx.lineJoin = "round";
+    if (S.closed || opts.closed) { ctx.fillStyle = "rgba(255,140,66,.13)"; ctx.fill(); }
+    ctx.stroke();
+  }
+  if (opts.labels && pts.length > 1) {
+    ctx.font = "11px Consolas,monospace"; ctx.fillStyle = "#e6edf3";
+    ctx.textAlign = "center"; ctx.textBaseline = "middle";
+    var n = pts.length, last = (S.closed || opts.closed) ? n : n - 1;
+    for (var k = 0; k < last; k++) {
+      var a = pts[k], b = pts[(k + 1) % n];
+      var L = Math.hypot(b[0] - a[0], b[1] - a[1]);
+      if (L < 0.15) continue;
+      ctx.fillText(L.toFixed(2), X((a[0] + b[0]) / 2), Y((a[1] + b[1]) / 2));
+    }
+  }
+  ctx.fillStyle = "#ffa55f";
+  pts.forEach(function (p) {
+    ctx.beginPath(); ctx.arc(X(p[0]), Y(p[1]), opts.dot || 3, 0, 6.284); ctx.fill();
+  });
+  // openings
+  (opts.openings || []).forEach(function (o) {
+    if (o.wall >= pts.length) return;
+    var a = pts[o.wall], b = pts[(o.wall + 1) % pts.length];
+    var L = Math.hypot(b[0] - a[0], b[1] - a[1]) || 1;
+    var ux = (b[0] - a[0]) / L, uy = (b[1] - a[1]) / L;
+    ctx.beginPath();
+    ctx.moveTo(X(a[0] + ux * o.u0), Y(a[1] + uy * o.u0));
+    ctx.lineTo(X(a[0] + ux * o.u1), Y(a[1] + uy * o.u1));
+    ctx.strokeStyle = o.type === "door" ? "#46e0d6" : "#ffd166";
+    ctx.lineWidth = (opts.thick || 2) + 2; ctx.stroke();
+  });
+  if (live) {
+    ctx.beginPath(); ctx.arc(X(live.model[0]), Y(live.model[1]), 3, 0, 6.284);
+    ctx.fillStyle = "#46e0d6"; ctx.fill();
+  }
+  // station marker
+  var st = RS.applyFit(S.fit, [0, 0]);
+  ctx.beginPath(); ctx.arc(X(st[0]), Y(st[1]), 3, 0, 6.284);
+  ctx.fillStyle = "#ff5d5d"; ctx.fill();
+}
+
+var rafOn = false;
+function loop() {
+  if (!rafOn) return;
+  try {
+    drawOverlay();
+    updateRead();
+    drawPlan(els.planc, S.corners, {});
+  } catch (e) {}
+  requestAnimationFrame(loop);
+}
+
+/* ------------------------------------------------------------- capture */
+function takeShot() {
+  var sd = steadyDir();
+  if (!sd) { toast(t("noSensor"), "err"); return null; }
+  if (sd.spreadDeg > 2.6 && !sd.thin) { toast(t("shaky"), "err"); vibrate(60); return null; }
+  return sd.dir;
+}
+
+function markCorner() {
+  var dir = takeShot();
+  if (!dir) return;
+  var h = RS.floorHit(dir, S.phoneH);
+  if (!h) { toast(t("tooFlat"), "err"); vibrate(60); return; }
+  var model = RS.applyFit(S.fit, [h.x, h.y]);
+  S.corners.push(model);
+  S.stationLocal.push([h.x, h.y]);
+  vibrate();
+  updateStat();
+}
+
+function undo() {
+  if (S.pending) { S.pending = null; setHint(""); return; }
+  if (!S.corners.length) return;
+  S.corners.pop();
+  S.stationLocal.pop();
+  S.closed = false;
+  vibrate();
+  updateStat();
+}
+
+function setHint(txt) {
+  els.read.dataset.hint = txt || "";
+  if (txt) toast(txt, "", 3200);
+}
+
+/* ceiling: aim at the wall-ceiling corner above an already-measured corner */
+function measureCeiling() {
+  if (!S.corners.length) { toast(t("need3"), "err"); return; }
+  var dir = takeShot();
+  if (!dir) return;
+  var ref = S.corners[S.corners.length - 1];
+  var st = RS.applyFit(S.fit, [0, 0]);
+  var r = Math.hypot(ref[0] - st[0], ref[1] - st[1]);
+  var z = RS.heightAt(dir, r, S.phoneH);
+  if (z === null || z < 1.6 || z > 8) {
+    toast(lang === "he" ? "לא הצלחתי למדוד — כוון לפינה שבין הקיר לתקרה"
+                        : "Could not measure — aim at the wall/ceiling corner", "err");
+    return;
+  }
+  S.ceiling = z;
+  S.ceilingMeasured = true;
+  vibrate(30);
+  toast(t("ceil") + ": " + z.toFixed(2) + " m", "ok");
+  updateStat();
+}
+
+/* door / window: three taps - bottom-left, bottom-right, top */
+function beginOpening() {
+  if (S.corners.length < 3) { toast(t("need3"), "err"); return; }
+  S.pending = { kind: "opening", shots: [] };
+  setHint(t("openStep1"));
+}
+
+function openingShot() {
+  var dir = takeShot();
+  if (!dir) return;
+  var p = S.pending;
+  if (p.shots.length < 2) {
+    var h = RS.floorHit(dir, S.phoneH);
+    if (!h) { toast(t("tooFlat"), "err"); return; }
+    p.shots.push({ model: RS.applyFit(S.fit, [h.x, h.y]) });
+    vibrate();
+    setHint(p.shots.length === 1 ? t("openStep2") : t("openStep3"));
+    return;
+  }
+  // third shot: the top edge, at the horizontal distance of the opening centre
+  var a = p.shots[0].model, b = p.shots[1].model;
+  var mid = [(a[0] + b[0]) / 2, (a[1] + b[1]) / 2];
+  var st = RS.applyFit(S.fit, [0, 0]);
+  var r = Math.hypot(mid[0] - st[0], mid[1] - st[1]);
+  var top = RS.heightAt(dir, r, S.phoneH);
+  if (top === null || top < 0.3) { toast(t("tooFlat"), "err"); return; }
+  top = Math.min(top, S.ceiling);
+
+  var w = RS.nearestWall(S.corners, mid);
+  var p0 = RS.projectOnWall(S.corners, w.wall, a);
+  var p1 = RS.projectOnWall(S.corners, w.wall, b);
+  var u0 = Math.min(p0.u, p1.u), u1 = Math.max(p0.u, p1.u);
+  var isDoor = top > 1.6 && (top - 0) > 1.6;
+  // a door reaches the floor; a window starts higher. Ask if it is ambiguous.
+  var sill = 0;
+  S.pending = null;
+  askOpeningKind(function (kind) {
+    if (kind === "window") sill = Math.max(0, Math.min(top - 0.2, 0.9));
+    S.openings.push({ wall: w.wall, type: kind, u0: u0, u1: u1, z0: sill, z1: top });
+    vibrate(30);
+    toast((kind === "door" ? t("door") : t("window")) + ": "
+          + (u1 - u0).toFixed(2) + " × " + (top - sill).toFixed(2) + " m", "ok");
+  }, isDoor ? "door" : "window");
+}
+
+/* new station: re-shoot >= 2 known corners, then keep going */
+function beginStation() {
+  if (S.corners.length < 2) { toast(t("need3"), "err"); return; }
+  S.pending = { kind: "station", shots: [], refs: [] };
+  setHint(t("stationStep"));
+  pickCorner(function (i) {
+    S.pending.refs.push(i);
+  });
+}
+
+function stationShot() {
+  var dir = takeShot();
+  if (!dir) return;
+  var h = RS.floorHit(dir, S.phoneH);
+  if (!h) { toast(t("tooFlat"), "err"); return; }
+  var p = S.pending;
+  p.shots.push([h.x, h.y]);
+  vibrate();
+  if (p.shots.length < p.refs.length) return;
+  if (p.shots.length < 2) { pickCorner(function (i) { p.refs.push(i); }); return; }
+  var model = p.refs.map(function (i) { return S.corners[i]; });
+  var fit = RS.fitStations(p.shots, model);
+  if (!fit || fit.rms > 0.6 || Math.abs(fit.scale - 1) > 0.35) {
+    toast(t("linkFail") + (fit ? " (rms " + fit.rms.toFixed(2) + " m)" : ""), "err", 4200);
+    S.pending = null;
+    return;
+  }
+  S.fit = fit;
+  S.stationLocal = [];
+  S.stations.push({ x: RS.applyFit(fit, [0, 0])[0], y: RS.applyFit(fit, [0, 0])[1],
+                    h: S.phoneH, rms: fit.rms });
+  S.pending = null;
+  toast(t("linked") + " (rms " + (fit.rms * 100).toFixed(0) + " cm)", "ok");
+}
+
+function primaryAction() {
+  if (S.pending && S.pending.kind === "opening") return openingShot();
+  if (S.pending && S.pending.kind === "station") return stationShot();
+  markCorner();
+}
+
+/* --------------------------------------------------------------- sheets */
+function sheet(html) {
+  els.sheet.innerHTML = html;
+  els.sheet.classList.add("show");
+}
+function closeSheet() { els.sheet.classList.remove("show"); els.sheet.innerHTML = ""; }
+
+function esc(s) {
+  return String(s).replace(/[&<>"]/g, function (c) {
+    return { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c];
+  });
+}
+
+function askOpeningKind(cb, preferred) {
+  sheet('<div class="card"><h2>' + t("openingWhich") + '</h2>'
+    + '<div class="row" style="margin-top:14px">'
+    + '<div class="btn primary" id="okDoor">' + t("door") + '</div>'
+    + '<div class="btn" id="okWin">' + t("window") + '</div></div></div>');
+  document.getElementById("okDoor").onclick = function () { closeSheet(); cb("door"); };
+  document.getElementById("okWin").onclick = function () { closeSheet(); cb("window"); };
+}
+
+function pickCorner(cb) {
+  var rows = S.corners.map(function (p, i) {
+    return '<div class="btn" data-i="' + i + '" style="margin:5px 0">'
+      + (i + 1) + ' — (' + p[0].toFixed(2) + ', ' + p[1].toFixed(2) + ')</div>';
+  }).join("");
+  sheet('<div class="card"><h2>' + t("pickCorner") + '</h2><p>' + t("stationStep")
+    + '</p>' + rows + '<div class="btn ghost" id="pcCancel" style="margin-top:10px">'
+    + t("cancel") + '</div></div>');
+  els.sheet.querySelectorAll("[data-i]").forEach(function (el) {
+    el.onclick = function () {
+      closeSheet();
+      cb(parseInt(el.getAttribute("data-i"), 10));
+      setHint(lang === "he" ? "כוון לפינה הזו ולחץ" : "Aim at that corner and tap");
+    };
+  });
+  document.getElementById("pcCancel").onclick = function () { closeSheet(); S.pending = null; };
+}
+
+/* ------------------------------------------------------------- gate/setup */
+function showGate() {
+  S.supports.secure = window.isSecureContext === true;
+  var arRow = '<span class="pill" id="pillAr">AR …</span>';
+  sheet('<div class="card">'
+    + '<h2>ACHILLES · ' + t("title") + '</h2>'
+    + '<p>' + (lang === "he"
+        ? "סרוק חדר עם מצלמת הטלפון וקבל מודל תלת־מימד ותוכנית קומה."
+        : "Scan a room with the phone camera and get a 3D model and a floor plan.") + '</p>'
+    + '<div class="row" style="gap:6px;flex-wrap:wrap">'
+    + '<span class="pill ' + (S.supports.secure ? "ok" : "no") + '">HTTPS</span>'
+    + '<span class="pill" id="pillCam">' + t("noCam").replace(/^.*$/, "Camera") + '</span>'
+    + '<span class="pill" id="pillOri">Sensors</span>' + arRow + '</div>'
+    + (S.supports.secure ? "" : '<p style="color:#ffb4b4">' + t("needHttps") + '</p>')
+    + '<div class="btn primary" id="goBtn" style="margin-top:14px">' + t("start") + '</div>'
+    + '<div class="btn ghost" id="manBtn" style="margin-top:8px">' + t("modeManual") + '</div>'
+    + '<h3>' + t("tips") + '</h3>'
+    + '<p>· ' + t("tip1") + '<br>· ' + t("tip2") + '<br>· ' + t("tip3") + '<br>· ' + t("tip4") + '</p>'
+    + '</div>');
+  document.getElementById("goBtn").onclick = beginSession;
+  document.getElementById("manBtn").onclick = function () { S.mode = "manual"; showManual(); };
+  probeAR();
+}
+
+async function probeAR() {
+  var pill = document.getElementById("pillAr");
+  var ok = false;
+  try {
+    ok = !!(navigator.xr && await navigator.xr.isSessionSupported("immersive-ar"));
+  } catch (e) { ok = false; }
+  S.supports.ar = ok;
+  if (pill) { pill.textContent = "AR"; pill.className = "pill " + (ok ? "ok" : "no"); }
+}
+
+async function beginSession() {
+  var camOk = await startCamera();
+  var oriOk = await requestSensors();
+  var pc = document.getElementById("pillCam"), po = document.getElementById("pillOri");
+  if (pc) pc.className = "pill " + (camOk ? "ok" : "no");
+  if (po) po.className = "pill " + (oriOk ? "ok" : "no");
+  if (!oriOk) {
+    toast(t("noSensor") + (window.isSecureContext ? "" : " — " + t("needHttps")), "err", 5000);
+    showManual();
+    return;
+  }
+  showSetup();
+}
+
+function showSetup() {
+  var arOpt = S.supports.ar ? '<option value="ar">' + t("modeAr") + '</option>' : "";
+  sheet('<div class="card">'
+    + '<h2>' + t("setup") + '</h2>'
+    + '<div class="row"><label>' + t("roomName") + '</label>'
+    + '<input type="text" id="fName" value="' + esc(S.name || (lang === "he" ? "חדר" : "Room")) + '"></div>'
+    + '<div class="row"><label>' + t("mode") + '</label><select id="fMode">'
+    + arOpt + '<option value="sensor">' + t("modeSensor") + '</option>'
+    + '<option value="manual">' + t("modeManual") + '</option></select></div>'
+    + '<div class="row"><label>' + t("phoneH") + '</label>'
+    + '<input type="range" id="fH" min="0.8" max="2.0" step="0.01" value="' + S.phoneH + '">'
+    + '<span class="val" id="vH">' + S.phoneH.toFixed(2) + '</span></div>'
+    + '<div class="btn" id="calBtn">' + t("calib") + '</div>'
+    + '<p>' + t("calibHelp") + '</p>'
+    + '<div class="btn primary" id="startBtn" style="margin-top:12px">' + t("go") + '</div>'
+    + '</div>');
+  var fH = document.getElementById("fH");
+  fH.oninput = function () {
+    S.phoneH = parseFloat(fH.value);
+    document.getElementById("vH").textContent = S.phoneH.toFixed(2);
+  };
+  document.getElementById("fMode").value = S.supports.ar ? "ar" : "sensor";
+  document.getElementById("calBtn").onclick = startCalibration;
+  document.getElementById("startBtn").onclick = function () {
+    S.name = document.getElementById("fName").value.trim() || "Room";
+    S.mode = document.getElementById("fMode").value;
+    S.stations[0].h = S.phoneH;
+    if (S.mode === "manual") { showManual(); return; }
+    if (S.mode === "ar") { closeSheet(); startAR(); return; }
+    closeSheet();
+    startScanning();
+  };
+}
+
+/* door calibration: two shots solve the phone height exactly */
+function startCalibration() {
+  var refH = 2.0;
+  sheet('<div class="card"><h2>' + t("calib") + '</h2><p>' + t("calibHelp") + '</p>'
+    + '<div class="row"><label>' + (lang === "he" ? "גובה הדלת" : "Door height") + '</label>'
+    + '<input type="number" id="cRef" step="0.01" value="2.00"></div>'
+    + '<div class="btn primary" id="cBottom">1 · ' + (lang === "he" ? "תחתית" : "Bottom") + '</div>'
+    + '<div class="btn primary hide" id="cTop" style="margin-top:8px">2 · '
+    + (lang === "he" ? "למעלה" : "Top") + '</div>'
+    + '<div class="btn ghost" id="cCancel" style="margin-top:8px">' + t("cancel") + '</div>'
+    + '<div id="cOut" style="margin-top:10px;font-family:Consolas,monospace;color:#ffa55f"></div>'
+    + '</div>');
+  var dB = null;
+  document.getElementById("cBottom").onclick = function () {
+    var d = takeShot();
+    if (!d) return;
+    if (d[2] >= 0) { toast(t("tooFlat"), "err"); return; }
+    dB = d; vibrate();
+    this.classList.add("hide");
+    document.getElementById("cTop").classList.remove("hide");
+  };
+  document.getElementById("cTop").onclick = function () {
+    var d = takeShot();
+    if (!d) return;
+    refH = parseFloat(document.getElementById("cRef").value) || 2.0;
+    var h = RS.heightFromReference(dB, d, refH);
+    if (h === null) {
+      toast(lang === "he" ? "לא הצלחתי — כוון מעל האופק" : "Failed — aim above the horizon", "err");
+      return;
+    }
+    S.phoneH = h;
+    S.stations[0].h = h;
+    vibrate(30);
+    document.getElementById("cOut").textContent = t("phoneH") + " = " + h.toFixed(3) + " m";
+    setTimeout(showSetup, 1100);
+  };
+  document.getElementById("cCancel").onclick = showSetup;
+}
+
+function showManual() {
+  S.mode = "manual";
+  sheet('<div class="card"><h2>' + t("modeManual") + '</h2>'
+    + '<p>' + (lang === "he" ? "חדר מלבני לפי מידות." : "A rectangular room from measurements.") + '</p>'
+    + '<div class="row"><label>' + t("roomName") + '</label>'
+    + '<input type="text" id="mName" value="' + esc(S.name || (lang === "he" ? "חדר" : "Room")) + '"></div>'
+    + '<div class="row"><label>' + t("manualW") + ' (m)</label>'
+    + '<input type="number" id="mW" step="0.01" value="4.00"></div>'
+    + '<div class="row"><label>' + t("manualD") + ' (m)</label>'
+    + '<input type="number" id="mD" step="0.01" value="3.00"></div>'
+    + '<div class="row"><label>' + t("manualH") + ' (m)</label>'
+    + '<input type="number" id="mH" step="0.01" value="2.60"></div>'
+    + '<div class="btn primary" id="mGo" style="margin-top:10px">' + t("build") + '</div>'
+    + '<div class="btn ghost" id="mBack" style="margin-top:8px">' + t("back") + '</div></div>');
+  document.getElementById("mGo").onclick = function () {
+    var w = Math.abs(parseFloat(document.getElementById("mW").value)) || 4;
+    var d = Math.abs(parseFloat(document.getElementById("mD").value)) || 3;
+    S.ceiling = Math.abs(parseFloat(document.getElementById("mH").value)) || 2.6;
+    S.name = document.getElementById("mName").value.trim() || "Room";
+    S.corners = [[0, 0], [w, 0], [w, d], [0, d]];
+    S.closed = true;
+    S.stations = [{ x: w / 2, y: d / 2, h: S.phoneH, rms: 0 }];
+    showReview();
+  };
+  document.getElementById("mBack").onclick = showGate;
+}
+
+function startScanning() {
+  els.hud.classList.remove("hide");
+  els.read.classList.remove("hide");
+  els.plan.classList.remove("hide");
+  els.bar.classList.remove("hide");
+  els.planLbl.textContent = t("area");
+  els.bMark.textContent = t("mark");
+  els.bClose.textContent = t("closeRoom");
+  els.bHeight.textContent = t("height");
+  els.bOpen.textContent = t("opening");
+  updateStat();
+  if (!rafOn) { rafOn = true; loop(); }
+  toast(t("aimFloor"), "", 3000);
+}
+
+/* --------------------------------------------------------------- review */
+function finishRoom() {
+  if (S.corners.length < 3) { toast(t("need3"), "err"); return; }
+  S.closed = true;
+  showReview();
+}
+
+function showReview() {
+  var pts = S.corners;
+  var area = Math.abs(RS.polyArea(pts));
+  var per = RS.polyPerimeter(pts);
+  var wallRows = pts.map(function (p, i) {
+    var q = pts[(i + 1) % pts.length];
+    return "<tr><td>" + t("wall") + " " + (i + 1) + "</td><td>"
+      + Math.hypot(q[0] - p[0], q[1] - p[1]).toFixed(2) + " m</td></tr>";
+  }).join("");
+  sheet('<div class="card">'
+    + '<h2>' + t("review") + ' · ' + esc(S.name) + '</h2>'
+    + '<canvas id="planBig" width="520" height="380"></canvas>'
+    + '<table><tr><td>' + t("area") + '</td><td><b>' + area.toFixed(2) + ' m²</b></td></tr>'
+    + '<tr><td>' + t("perim") + '</td><td>' + per.toFixed(2) + ' m</td></tr>'
+    + '<tr><td>' + t("ceil") + '</td><td>' + S.ceiling.toFixed(2) + ' m'
+    + (S.ceilingMeasured ? "" : " *") + '</td></tr>'
+    + '<tr><td>' + t("vol") + '</td><td>' + (area * S.ceiling).toFixed(2) + ' m³</td></tr>'
+    + '<tr><td>' + t("corners") + '</td><td>' + pts.length + '</td></tr>'
+    + '<tr><td>' + t("opening") + '</td><td>' + S.openings.length + '</td></tr></table>'
+    + '<div class="btn" id="rSquare" style="margin-top:10px">' + t("square") + '</div>'
+    + '<h3>' + t("walls") + '</h3><table>' + wallRows + '</table>'
+    + '<div class="btn primary" id="rSend" style="margin-top:14px">' + t("send") + '</div>'
+    + '<div class="row" style="margin-top:8px">'
+    + '<div class="btn" id="rDown">' + t("download") + '</div>'
+    + '<div class="btn ghost" id="rBack">' + t("back") + '</div></div>'
+    + '</div>');
+  var big = document.getElementById("planBig");
+  drawPlan(big, pts, { live: false, closed: true, labels: true, dot: 4, thick: 2.5,
+                       openings: S.openings, pad: 10 });
+  document.getElementById("rSquare").onclick = function () {
+    var reg = RS.regularize(S.corners, 10);
+    S.corners = reg.points;
+    toast(lang === "he" ? "יושר: " + reg.changed + " קירות" : reg.changed + " walls squared", "ok");
+    showReview();
+  };
+  document.getElementById("rSend").onclick = sendScan;
+  document.getElementById("rDown").onclick = downloadScan;
+  document.getElementById("rBack").onclick = function () {
+    S.closed = false; closeSheet();
+    if (S.mode === "manual") showManual(); else startScanning();
+  };
+}
+
+function buildDoc() {
+  var pts = RS.ensureCCW(S.corners);
+  return {
+    name: S.name,
+    ceiling: S.ceiling,
+    floor: pts.map(function (p) { return [Math.round(p[0] * 1e4) / 1e4,
+                                          Math.round(p[1] * 1e4) / 1e4]; }),
+    openings: S.openings,
+    objects: [],
+    stations: S.stations,
+    meta: {
+      mode: S.mode,
+      ceilingMeasured: S.ceilingMeasured ? "yes" : "assumed",
+      phoneHeight: S.phoneH.toFixed(3),
+      stations: String(S.stations.length),
+      ua: (navigator.userAgent || "").slice(0, 140),
+      app: "roomscan.html v4.68"
+    }
+  };
+}
+
+async function sendScan() {
+  var btn = document.getElementById("rSend");
+  if (btn) { btn.textContent = t("sending"); btn.setAttribute("disabled", ""); }
+  try {
+    var r = await fetch(API + "/api/scan?k=" + encodeURIComponent(TOKEN), {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(buildDoc())
+    });
+    var j = await r.json().catch(function () { return {}; });
+    if (!r.ok || j.error) throw new Error(j.error || ("HTTP " + r.status));
+    toast(t("saved") + " · " + (j.stats ? j.stats.area_m2.toFixed(2) + " m²" : ""), "ok", 4000);
+    sheet('<div class="card"><h2>✓ ' + t("saved") + '</h2>'
+      + '<p>' + esc(j.name || S.name) + ' — ' + (j.stats ? j.stats.area_m2.toFixed(2) : "?") + ' m²</p>'
+      + '<p>' + esc(j.id || "") + '</p>'
+      + '<div class="btn primary" id="againBtn">' + t("again") + '</div></div>');
+    document.getElementById("againBtn").onclick = function () { location.reload(); };
+  } catch (e) {
+    toast(t("sendFail") + ": " + e.message, "err", 6000);
+    if (btn) { btn.textContent = t("send"); btn.removeAttribute("disabled"); }
+  }
+}
+
+function downloadScan() {
+  try {
+    var blob = new Blob([JSON.stringify(buildDoc(), null, 1)], { type: "application/json" });
+    var a = document.createElement("a");
+    a.href = URL.createObjectURL(blob);
+    a.download = (S.name || "room").replace(/[^\w֐-׿-]+/g, "_") + ".json";
+    document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(function () { URL.revokeObjectURL(a.href); }, 4000);
+  } catch (e) { toast(String(e), "err"); }
+}
+
+/* ------------------------------------------------------------------- AR */
+/* WebXR hit-test.  The reference space is local-floor, so y=0 IS the floor and
+   a hit pose gives the corner directly - no phone-height guess, no compass,
+   ~2 cm instead of ~15 cm.  Everything here is optional: any failure drops
+   back to sensor mode. */
+async function startAR() {
+  var THREEURLS = [
+    "https://unpkg.com/three@0.160.0/build/three.module.js",
+    "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
+    "https://cdnjs.cloudflare.com/ajax/libs/three.js/0.160.0/three.module.min.js"
+  ];
+  var THREE = null;
+  for (var i = 0; i < THREEURLS.length && !THREE; i++) {
+    try { THREE = await import(THREEURLS[i]); } catch (e) { THREE = null; }
+  }
+  if (!THREE) {
+    toast(lang === "he" ? "לא הצלחתי לטעון את מנוע ה-AR — עובר לחיישנים"
+                        : "AR engine failed to load — using sensors", "err", 4000);
+    S.mode = "sensor"; startScanning(); return;
+  }
+
+  var session;
+  try {
+    session = await navigator.xr.requestSession("immersive-ar", {
+      requiredFeatures: ["hit-test", "local-floor"],
+      optionalFeatures: ["dom-overlay"],
+      domOverlay: { root: els.arOverlay }
+    });
+  } catch (e) {
+    toast(lang === "he" ? "AR לא זמין — עובר לחיישנים" : "AR unavailable — using sensors", "err", 4000);
+    S.mode = "sensor"; startScanning(); return;
+  }
+
+  els.arOverlay.classList.add("show");
+  els.arMark.textContent = t("mark");
+  els.arDone.textContent = t("done");
+  var canvas = document.createElement("canvas");
+  var gl = canvas.getContext("webgl", { xrCompatible: true, alpha: true, antialias: true });
+  var renderer = new THREE.WebGLRenderer({ canvas: canvas, context: gl, alpha: true });
+  renderer.autoClear = false;
+  renderer.xr.enabled = true;
+  renderer.xr.setReferenceSpaceType("local-floor");
+  await renderer.xr.setSession(session);
+
+  var scene = new THREE.Scene();
+  var camera = new THREE.PerspectiveCamera();
+  scene.add(new THREE.HemisphereLight(0xffffff, 0x334455, 1.4));
+
+  var reticle = new THREE.Mesh(
+    new THREE.RingGeometry(0.055, 0.075, 40).rotateX(-Math.PI / 2),
+    new THREE.MeshBasicMaterial({ color: 0x46e0d6 }));
+  reticle.matrixAutoUpdate = false;
+  reticle.visible = false;
+  scene.add(reticle);
+
+  var group = new THREE.Group();
+  scene.add(group);
+  var lineMat = new THREE.LineBasicMaterial({ color: 0xff8c42 });
+  var line = null;
+
+  function redraw() {
+    while (group.children.length) group.remove(group.children[0]);
+    S.corners.forEach(function (p) {
+      var m = new THREE.Mesh(new THREE.SphereGeometry(0.035, 16, 12),
+                             new THREE.MeshBasicMaterial({ color: 0xffa55f }));
+      m.position.set(p[0], 0, -p[1]);
+      group.add(m);
+    });
+    if (S.corners.length > 1) {
+      var pts = S.corners.map(function (p) { return new THREE.Vector3(p[0], 0.005, -p[1]); });
+      if (S.corners.length > 2) pts.push(pts[0].clone());
+      line = new THREE.Line(new THREE.BufferGeometry().setFromPoints(pts), lineMat);
+      group.add(line);
+    }
+    els.arInfo.innerHTML = "<b>" + S.corners.length + "</b> " + t("corners")
+      + (S.corners.length >= 3
+         ? " · <b>" + Math.abs(RS.polyArea(S.corners)).toFixed(2) + "</b> m²" : "")
+      + "<br><span style='color:#8b97a5;font-size:11.5px'>" + t("aimFloor") + "</span>";
+  }
+  redraw();
+
+  var hitSource = null, viewerSpace = null;
+  try {
+    viewerSpace = await session.requestReferenceSpace("viewer");
+    hitSource = await session.requestHitTestSource({ space: viewerSpace });
+  } catch (e) { hitSource = null; }
+
+  var lastHit = null, camY = 1.5, ceilSeen = 0;
+
+  function place() {
+    if (!lastHit) {
+      toast(lang === "he" ? "אין משטח מזוהה — הזז את הטלפון לאט"
+                          : "No surface yet — move the phone slowly", "err");
+      return;
+    }
+    if (lastHit.y > camY + 0.25) {          // that is the ceiling, not the floor
+      ceilSeen = lastHit.y;
+      S.ceiling = lastHit.y;
+      S.ceilingMeasured = true;
+      toast(t("ceil") + ": " + lastHit.y.toFixed(2) + " m", "ok");
+      redraw();
+      return;
+    }
+    S.corners.push([lastHit.x, -lastHit.z]);
+    vibrate();
+    redraw();
+  }
+
+  els.arMark.onclick = place;
+  els.arUndo.onclick = function () { S.corners.pop(); vibrate(); redraw(); };
+  els.arDone.onclick = function () { session.end(); };
+  session.addEventListener("select", place);
+  session.addEventListener("end", function () {
+    els.arOverlay.classList.remove("show");
+    renderer.setAnimationLoop(null);
+    try { renderer.dispose(); } catch (e) {}
+    if (!S.ceilingMeasured) S.ceiling = 2.6;
+    S.stations = [{ x: 0, y: 0, h: camY, rms: 0 }];
+    if (S.corners.length >= 3) { S.closed = true; showReview(); }
+    else { S.mode = "sensor"; startScanning(); }
+  });
+
+  renderer.setAnimationLoop(function (time, frame) {
+    if (!frame) return;
+    var ref = renderer.xr.getReferenceSpace();
+    var pose = frame.getViewerPose(ref);
+    if (pose) camY = pose.transform.position.y;
+    if (hitSource) {
+      var hits = frame.getHitTestResults(hitSource);
+      if (hits.length) {
+        var p = hits[0].getPose(ref);
+        reticle.visible = true;
+        reticle.matrix.fromArray(p.transform.matrix);
+        lastHit = { x: p.transform.position.x, y: p.transform.position.y,
+                    z: p.transform.position.z };
+      } else {
+        reticle.visible = false;
+      }
+    }
+    renderer.render(scene, camera);
+  });
+}
+
+/* ------------------------------------------------------------------ menu */
+function showMenu() {
+  sheet('<div class="card"><h2>' + t("menu") + '</h2>'
+    + '<div class="btn" id="mSt">' + t("newStation") + '</div>'
+    + '<div class="btn" id="mPh" style="margin-top:8px">' + t("photo") + '</div>'
+    + '<div class="btn" id="mSq" style="margin-top:8px">' + t("square") + '</div>'
+    + '<div class="btn" id="mRe" style="margin-top:8px">' + t("setup") + '</div>'
+    + '<div class="btn ghost" id="mCl" style="margin-top:12px">' + t("back") + '</div>'
+    + '<h3>' + t("tips") + '</h3><p>· ' + t("tip1") + '<br>· ' + t("tip2")
+    + '<br>· ' + t("tip3") + '</p></div>');
+  document.getElementById("mSt").onclick = function () { closeSheet(); beginStation(); };
+  document.getElementById("mPh").onclick = function () { closeSheet(); takePhoto(); };
+  document.getElementById("mSq").onclick = function () {
+    if (S.corners.length < 3) { toast(t("need3"), "err"); return; }
+    var reg = RS.regularize(S.corners, 10);
+    S.corners = reg.points;
+    closeSheet();
+    toast(lang === "he" ? "יושר: " + reg.changed + " קירות" : reg.changed + " walls squared", "ok");
+  };
+  document.getElementById("mRe").onclick = function () { showSetup(); };
+  document.getElementById("mCl").onclick = closeSheet;
+}
+
+function takePhoto() {
+  try {
+    var v = els.cam;
+    if (!v.videoWidth) { toast(t("noCam"), "err"); return; }
+    var c = document.createElement("canvas");
+    c.width = Math.min(1600, v.videoWidth);
+    c.height = Math.round(c.width * v.videoHeight / v.videoWidth);
+    c.getContext("2d").drawImage(v, 0, 0, c.width, c.height);
+    c.toBlob(async function (b) {
+      if (!b) return;
+      try {
+        var r = await fetch(API + "/api/photo?k=" + encodeURIComponent(TOKEN)
+                            + "&name=" + encodeURIComponent(S.name), {
+          method: "POST", headers: { "Content-Type": "image/jpeg" }, body: b
+        });
+        toast(r.ok ? "📷 ✓" : t("sendFail"), r.ok ? "ok" : "err");
+      } catch (e) { toast(t("sendFail"), "err"); }
+    }, "image/jpeg", 0.86);
+    vibrate();
+  } catch (e) { toast(String(e), "err"); }
+}
+
+/* ------------------------------------------------------------------ wire */
+els.bMark.onclick = primaryAction;
+els.bClose.onclick = finishRoom;
+els.bHeight.onclick = measureCeiling;
+els.bOpen.onclick = beginOpening;
+els.bUndo.onclick = undo;
+els.menuChip.onclick = showMenu;
+els.langChip.onclick = function () {
+  lang = lang === "he" ? "en" : "he";
+  document.documentElement.lang = lang;
+  document.documentElement.dir = lang === "he" ? "rtl" : "ltr";
+  els.langChip.textContent = t("lang");
+  els.bMark.textContent = t("mark"); els.bClose.textContent = t("closeRoom");
+  els.bHeight.textContent = t("height"); els.bOpen.textContent = t("opening");
+  if (els.sheet.classList.contains("show")) showGate();
+  updateStat();
+};
+// volume-key-free one-hand shortcut: tap anywhere on the video to mark
+els.ovl.addEventListener("click", function () {});
+document.addEventListener("keydown", function (e) {
+  if (e.key === "Enter" && !els.sheet.classList.contains("show")) primaryAction();
+});
+window.addEventListener("resize", function () { try { drawOverlay(); } catch (e) {} });
+
+els.langChip.textContent = t("lang");
+document.documentElement.lang = lang;
+document.documentElement.dir = lang === "he" ? "rtl" : "ltr";
+showGate();
+</script>
+</body>
+</html>

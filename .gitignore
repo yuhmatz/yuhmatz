@@ -18,5 +18,7 @@ Obsidian_Vault/
 backups/
 .portal_profile/
 .face_profile/
+.roomscan_cert/
+RoomScans/
 __pycache__/
 *.pyc

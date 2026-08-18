@@ -1,0 +1,533 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>ACHILLES · RoomScan Console</title>
+<style>
+  :root{ --amber:#ff8c42; --amber2:#ffa55f; --ink:#0a0c10; --panel:rgba(12,15,20,.86);
+         --text:#e6edf3; --muted:#8b97a5; --divider:#222a35; --good:#46e0d6;
+         --warn:#ffd166; --bad:#ff5d5d; }
+  *{box-sizing:border-box;}
+  html,body{margin:0;height:100%;background:var(--ink);color:var(--text);overflow:hidden;
+            font-family:"Segoe UI",system-ui,Arial,sans-serif;}
+  #wrap{display:grid;grid-template-columns:330px 1fr;height:100%;}
+  #side{border-inline-end:1px solid var(--divider);overflow-y:auto;padding:14px;
+        background:#0c0f14;}
+  #main{position:relative;overflow:hidden;}
+  #view{position:absolute;inset:0;}
+  #view canvas{display:block;width:100%;height:100%;}
+  .brand{color:var(--amber);font-weight:700;letter-spacing:.12em;font-size:15px;}
+  .sub{color:var(--muted);font-size:11px;margin-top:2px;letter-spacing:.06em;}
+  .card{background:var(--panel);border:1px solid var(--divider);border-radius:14px;
+        padding:13px 14px;margin-top:13px;}
+  .card h3{margin:0 0 8px;font-size:12px;color:var(--amber);letter-spacing:.09em;
+           text-transform:uppercase;font-weight:700;}
+  .card p{margin:6px 0;font-size:12.5px;color:var(--muted);line-height:1.6;}
+  #qrbox{background:#fff;border-radius:10px;padding:9px;display:flex;align-items:center;
+         justify-content:center;min-height:180px;}
+  #qrbox img,#qrbox canvas,#qrbox table{max-width:100%;image-rendering:pixelated;}
+  #urlbox{margin-top:9px;background:#080a0e;border:1px solid var(--divider);border-radius:8px;
+          padding:9px;font-family:Consolas,monospace;font-size:11.5px;color:var(--amber2);
+          word-break:break-all;user-select:all;cursor:pointer;line-height:1.5;}
+  .pill{display:inline-block;border-radius:999px;padding:2px 9px;font-size:10.5px;
+        border:1px solid var(--divider);color:var(--muted);margin:0 4px 4px 0;}
+  .pill.ok{border-color:var(--good);color:var(--good);}
+  .pill.no{border-color:var(--bad);color:var(--bad);}
+  .scan{border:1px solid var(--divider);border-radius:11px;padding:9px 11px;margin-bottom:8px;
+        cursor:pointer;transition:.13s;background:rgba(0,0,0,.28);}
+  .scan:hover{border-color:var(--amber);}
+  .scan.on{border-color:var(--amber);background:rgba(255,140,66,.10);}
+  .scan .n{font-size:13.5px;font-weight:600;}
+  .scan .m{font-size:11px;color:var(--muted);margin-top:3px;font-family:Consolas,monospace;}
+  #hud{position:absolute;top:14px;inset-inline-start:14px;z-index:4;background:var(--panel);
+       border:1px solid var(--divider);border-radius:14px;padding:12px 16px;
+       backdrop-filter:blur(6px);min-width:220px;}
+  #hud h2{margin:0 0 8px;font-size:16px;color:var(--amber);}
+  #hud table{font-size:12.5px;border-collapse:collapse;}
+  #hud td{padding:2px 0;}
+  #hud td.k{color:var(--muted);padding-inline-end:14px;white-space:nowrap;}
+  #plan{position:absolute;bottom:14px;inset-inline-start:14px;z-index:4;background:var(--panel);
+        border:1px solid var(--divider);border-radius:14px;padding:8px;backdrop-filter:blur(6px);}
+  #plan canvas{display:block;border-radius:8px;}
+  #tools{position:absolute;top:14px;inset-inline-end:14px;z-index:4;display:flex;
+         flex-direction:column;gap:8px;align-items:stretch;}
+  .tg{background:var(--panel);border:1px solid var(--divider);border-radius:12px;
+      color:var(--text);padding:9px 14px;font-size:12.5px;cursor:pointer;user-select:none;
+      backdrop-filter:blur(6px);transition:.13s;text-align:start;min-width:150px;
+      text-decoration:none;display:block;}
+  .tg:hover{border-color:var(--amber);}
+  .tg.off{opacity:.45;}
+  .tg .sw{float:inline-end;font-weight:700;color:var(--muted);}
+  #empty{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;
+         color:var(--muted);font-size:14px;text-align:center;padding:40px;line-height:1.9;}
+  #err{position:absolute;bottom:14px;inset-inline-end:14px;z-index:6;color:#ff7b72;font-size:12px;
+       background:var(--panel);border:1px solid #5a2020;border-radius:10px;padding:8px 12px;
+       max-width:360px;display:none;}
+</style>
+</head>
+<body>
+<div id="wrap">
+  <div id="side">
+    <div class="brand">ACHILLES · ROOMSCAN</div>
+    <div class="sub">PHONE → 3D MODEL</div>
+
+    <div class="card">
+      <h3>Connect the phone</h3>
+      <div id="qrbox">…</div>
+      <div id="urlbox" title="click to copy">…</div>
+      <div style="margin-top:9px" id="pills"></div>
+      <p id="connhelp">Scan the code with the phone camera. The first visit shows a
+        certificate warning — that is the self-signed certificate JARVIS made for your
+        LAN; tap <b>Advanced → Proceed</b> once. Browsers only allow the camera and the
+        motion sensors on a secure connection, which is why it exists.</p>
+    </div>
+
+    <div class="card">
+      <h3>Scans <span id="scount" style="color:var(--muted);font-weight:400"></span></h3>
+      <div id="list"><p>Looking…</p></div>
+    </div>
+  </div>
+
+  <div id="main">
+    <div id="view"></div>
+    <div id="empty">No room selected.<br>Scan one with the phone, or pick a saved scan.</div>
+    <div id="hud" style="display:none">
+      <h2 id="hName">—</h2>
+      <table id="hTable"></table>
+    </div>
+    <div id="plan" style="display:none"><canvas id="planc" width="300" height="230"></canvas></div>
+    <div id="tools" style="display:none">
+      <div class="tg" id="tCeil">Ceiling <span class="sw">ON</span></div>
+      <div class="tg" id="tWalls">Walls <span class="sw">ON</span></div>
+      <div class="tg" id="tLabels">Dimensions <span class="sw">ON</span></div>
+      <a class="tg" id="dGlb" download>Download .glb</a>
+      <a class="tg" id="dObj" download>Download .obj</a>
+      <a class="tg" id="dSvg" target="_blank">Open floor plan</a>
+    </div>
+    <div id="err"></div>
+  </div>
+</div>
+
+<script type="module">
+const API = "http://" + location.hostname + ":7778";
+const FILES = location.origin;              // the :7777 static server, same origin
+const $ = (id) => document.getElementById(id);
+let THREE = null, renderer = null, scene = null, camera = null, roomGroup = null;
+let current = null, show = { ceiling: true, walls: true, labels: true };
+
+function err(msg) {
+  const e = $("err");
+  if (!msg) { e.style.display = "none"; return; }
+  e.textContent = msg;
+  e.style.display = "block";
+}
+
+/* ------------------------------------------------------------- connection */
+async function loadInfo() {
+  let info = {};
+  try {
+    info = await (await fetch(API + "/roomscan_info", { cache: "no-store" })).json();
+  } catch (e) {
+    err("JARVIS API on :7778 is not answering — is jarvis.py running?");
+    return;
+  }
+  $("urlbox").textContent = info.url || "(scanner not started)";
+  $("urlbox").onclick = () => navigator.clipboard?.writeText(info.url || "");
+  const pills = [];
+  pills.push(`<span class="pill ${info.https ? "ok" : "no"}">${info.https ? "HTTPS" : "NO TLS"}</span>`);
+  pills.push(`<span class="pill">${info.host || "?"}</span>`);
+  if (info.error) pills.push(`<span class="pill no">${escapeHtml(info.error)}</span>`);
+  $("pills").innerHTML = pills.join("");
+  if (!info.https) {
+    $("connhelp").innerHTML = "<b style='color:#ff7b72'>No certificate.</b> " +
+      "The phone camera will be blocked without HTTPS. Install <code>cryptography</code> " +
+      "(<code>pip install cryptography</code>) or put <code>openssl</code> on PATH, then " +
+      "restart JARVIS. Manual entry on the phone still works.";
+  }
+  drawQR(info.url || "");
+}
+
+/* QR from a CDN when reachable; the URL text below always works as a fallback. */
+async function drawQR(url) {
+  const box = $("qrbox");
+  if (!url) { box.textContent = "—"; return; }
+  const srcs = [
+    "https://unpkg.com/qrcode-generator@1.4.4/qrcode.js",
+    "https://cdn.jsdelivr.net/npm/qrcode-generator@1.4.4/qrcode.js",
+    "https://cdnjs.cloudflare.com/ajax/libs/qrcode-generator/1.4.4/qrcode.min.js"
+  ];
+  for (const s of srcs) {
+    if (window.qrcode) break;
+    try {
+      await new Promise((res, rej) => {
+        const el = document.createElement("script");
+        el.src = s; el.onload = res; el.onerror = rej;
+        document.head.appendChild(el);
+        setTimeout(rej, 4000);
+      });
+    } catch (e) { /* try the next mirror */ }
+  }
+  if (!window.qrcode) {
+    // No internet for the QR library. The address below is the whole connection
+    // path, so show it big enough to type off the screen.
+    box.style.background = "transparent";
+    box.style.display = "block";
+    const m = url.match(/^(https?:\/\/[^/]+)\/\?k=(.*)$/);
+    box.innerHTML =
+      '<div style="color:#8b97a5;font-size:11px;letter-spacing:.08em;text-align:center">' +
+      "NO INTERNET FOR THE QR CODE — TYPE THIS</div>" +
+      '<div style="font-family:Consolas,monospace;color:#ffa55f;font-size:15px;' +
+      'text-align:center;margin-top:10px;word-break:break-all;user-select:all">' +
+      (m ? escapeHtml(m[1]) + '<div style="color:#46e0d6;margin-top:6px">/?k=' +
+           escapeHtml(m[2]) + "</div>" : escapeHtml(url)) + "</div>";
+    return;
+  }
+  try {
+    let qr = null;
+    for (let t = 4; t <= 20; t++) {                 // smallest version that fits
+      try { qr = window.qrcode(t, "M"); qr.addData(url); qr.make(); break; }
+      catch (e) { qr = null; }
+    }
+    box.innerHTML = qr ? qr.createImgTag(5, 8) : "—";
+  } catch (e) { box.textContent = "—"; }
+}
+
+function escapeHtml(s) {
+  return String(s).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+}
+
+/* ------------------------------------------------------------------ list */
+let lastIds = "";
+async function loadList(auto) {
+  let j;
+  try {
+    j = await (await fetch(API + "/rooms", { cache: "no-store" })).json();
+  } catch (e) { return; }
+  const scans = j.scans || [];
+  const ids = scans.map((s) => s.id).join("|");
+  $("scount").textContent = scans.length ? "· " + scans.length : "";
+  if (ids === lastIds) return;
+  const fresh = lastIds && scans.length && !lastIds.split("|").includes(scans[0].id);
+  lastIds = ids;
+  $("list").innerHTML = scans.length
+    ? scans.map((s) => `<div class="scan${current && current.id === s.id ? " on" : ""}" data-id="${escapeHtml(s.id)}">
+         <div class="n">${escapeHtml(s.name)}</div>
+         <div class="m">${(s.area_m2 || 0).toFixed(2)} m² · ${(s.ceiling_m || 0).toFixed(2)} m ·
+           ${s.corners || 0} corners · ${(s.created || "").replace("T", " ").slice(0, 16)}</div>
+       </div>`).join("")
+    : "<p>Nothing scanned yet.</p>";
+  $("list").querySelectorAll("[data-id]").forEach((el) => {
+    el.onclick = () => openScan(el.getAttribute("data-id"));
+  });
+  // open the newest scan on first load, and again whenever the phone sends one
+  if (scans.length && (!current || (fresh && auto))) openScan(scans[0].id);
+}
+
+async function openScan(id) {
+  try {
+    const s = await (await fetch(API + "/room?id=" + encodeURIComponent(id),
+                                 { cache: "no-store" })).json();
+    if (s.error) throw new Error(s.error);
+    current = s;
+    lastIds = "";                                    // force the list to repaint the selection
+    await loadList(false);
+    render(s);
+  } catch (e) { err("Could not load that scan: " + e.message); }
+}
+
+/* -------------------------------------------------------------- geometry */
+/* Built here from scan.json rather than by loading room.glb, so the console
+   still works with no GLTFLoader/CDN. The .glb and .obj are one click away. */
+function buildRoom(s) {
+  const g = new THREE.Group();
+  const floor = s.floor, H = s.ceiling, n = floor.length;
+  const V = (x, y, z) => new THREE.Vector3(x, z, -y);      // scan Z-up -> three Y-up
+
+  const shape = new THREE.Shape(floor.map((p) => new THREE.Vector2(p[0], p[1])));
+  const floorGeo = new THREE.ShapeGeometry(shape);
+  floorGeo.rotateX(Math.PI / 2);                            // XY plane -> XZ, facing up
+  floorGeo.scale(1, 1, -1);
+  const floorMesh = new THREE.Mesh(floorGeo, new THREE.MeshStandardMaterial(
+    { color: 0x8c6b4d, roughness: .95, side: THREE.DoubleSide }));
+  floorMesh.name = "floor";
+  g.add(floorMesh);
+
+  const ceilGeo = floorGeo.clone();
+  ceilGeo.translate(0, H, 0);
+  const ceilMesh = new THREE.Mesh(ceilGeo, new THREE.MeshStandardMaterial(
+    { color: 0xf0f0ee, roughness: .98, side: THREE.DoubleSide,
+      transparent: true, opacity: .55 }));
+  ceilMesh.name = "ceiling";
+  g.add(ceilMesh);
+
+  const wallMat = new THREE.MeshStandardMaterial(
+    { color: 0xd2d5da, roughness: .92, side: THREE.DoubleSide });
+  const positions = [];
+  for (let i = 0; i < n; i++) {
+    const a = floor[i], b = floor[(i + 1) % n];
+    const L = Math.hypot(b[0] - a[0], b[1] - a[1]);
+    if (L < 1e-6) continue;
+    const dx = (b[0] - a[0]) / L, dy = (b[1] - a[1]) / L;
+    const mine = (s.openings || []).filter((o) => o.wall === i);
+    for (const [u0, u1, z0, z1] of wallCells(L, H, mine)) {
+      const p = (u, z) => V(a[0] + dx * u, a[1] + dy * u, z);
+      const c0 = p(u0, z0), c1 = p(u0, z1), c2 = p(u1, z1), c3 = p(u1, z0);
+      for (const v of [c0, c1, c2, c0, c2, c3]) positions.push(v.x, v.y, v.z);
+    }
+  }
+  if (positions.length) {
+    const wg = new THREE.BufferGeometry();
+    wg.setAttribute("position", new THREE.Float32BufferAttribute(positions, 3));
+    wg.computeVertexNormals();
+    const wm = new THREE.Mesh(wg, wallMat);
+    wm.name = "walls";
+    g.add(wm);
+  }
+
+  // opening frames, so a door reads as a door
+  const frameMat = { door: 0x46e0d6, window: 0xffd166, opening: 0xff8c42 };
+  for (const o of (s.openings || [])) {
+    const a = floor[o.wall], b = floor[(o.wall + 1) % n];
+    const L = Math.hypot(b[0] - a[0], b[1] - a[1]) || 1;
+    const dx = (b[0] - a[0]) / L, dy = (b[1] - a[1]) / L;
+    const p = (u, z) => V(a[0] + dx * u, a[1] + dy * u, z);
+    const ring = [p(o.u0, o.z0), p(o.u1, o.z0), p(o.u1, o.z1), p(o.u0, o.z1), p(o.u0, o.z0)];
+    const line = new THREE.Line(new THREE.BufferGeometry().setFromPoints(ring),
+      new THREE.LineBasicMaterial({ color: frameMat[o.type] || 0xff8c42 }));
+    line.name = "walls";
+    g.add(line);
+  }
+
+  for (const ob of (s.objects || [])) {
+    const box = new THREE.Mesh(new THREE.BoxGeometry(ob.w, ob.h, ob.d),
+      new THREE.MeshStandardMaterial({ color: 0x5a8cb8, roughness: .8 }));
+    box.position.set(ob.x, ob.h / 2, -ob.y);
+    box.rotation.y = -(ob.yaw || 0) * Math.PI / 180;
+    g.add(box);
+  }
+  return g;
+}
+
+/* Same cut-out rule as the Python exporter: split on every opening edge and
+   keep the cells whose centre is not inside an opening. */
+function wallCells(L, H, openings) {
+  const us = new Set([0, L]), zs = new Set([0, H]);
+  for (const o of openings) {
+    us.add(Math.max(0, Math.min(L, o.u0))); us.add(Math.max(0, Math.min(L, o.u1)));
+    zs.add(Math.max(0, Math.min(H, o.z0))); zs.add(Math.max(0, Math.min(H, o.z1)));
+  }
+  const U = [...us].sort((a, b) => a - b), Z = [...zs].sort((a, b) => a - b);
+  const out = [];
+  for (let i = 0; i < U.length - 1; i++)
+    for (let j = 0; j < Z.length - 1; j++) {
+      const u0 = U[i], u1 = U[i + 1], z0 = Z[j], z1 = Z[j + 1];
+      if (u1 - u0 < 1e-6 || z1 - z0 < 1e-6) continue;
+      const cu = (u0 + u1) / 2, cz = (z0 + z1) / 2;
+      if (openings.some((o) => cu >= o.u0 - 1e-9 && cu <= o.u1 + 1e-9 &&
+                               cz >= o.z0 - 1e-9 && cz <= o.z1 + 1e-9)) continue;
+      out.push([u0, u1, z0, z1]);
+    }
+  return out;
+}
+
+/* --------------------------------------------------------------- render */
+async function initThree() {
+  if (THREE) return true;
+  for (const u of ["https://unpkg.com/three@0.160.0/build/three.module.js",
+                   "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
+                   "https://cdnjs.cloudflare.com/ajax/libs/three.js/0.160.0/three.module.min.js"]) {
+    try { THREE = await import(u); break; } catch (e) { THREE = null; }
+  }
+  if (!THREE) {
+    err("three.js could not be loaded (no internet?) — the floor plan below still works.");
+    return false;
+  }
+  renderer = new THREE.WebGLRenderer({ antialias: true, alpha: false });
+  renderer.setPixelRatio(Math.min(2, devicePixelRatio || 1));
+  $("view").appendChild(renderer.domElement);
+  scene = new THREE.Scene();
+  scene.background = new THREE.Color(0x0a0c10);
+  camera = new THREE.PerspectiveCamera(52, 1, 0.05, 400);
+  scene.add(new THREE.HemisphereLight(0xffffff, 0x2a3038, 1.5));
+  const key = new THREE.DirectionalLight(0xfff0e0, 1.5);
+  key.position.set(4, 9, 6);
+  scene.add(key);
+  scene.add(new THREE.GridHelper(40, 40, 0x223040, 0x161d26));
+  setupOrbit();
+  resize();
+  addEventListener("resize", resize);
+  renderer.setAnimationLoop(() => {
+    updateCam();
+    renderer.render(scene, camera);
+  });
+  return true;
+}
+
+/* Minimal orbit controls — no addon, no extra CDN round-trip. */
+const cam = { az: -0.7, el: 0.62, dist: 11, tx: 0, ty: 0, tz: 0 };
+function updateCam() {
+  const ce = Math.cos(cam.el), se = Math.sin(cam.el);
+  camera.position.set(cam.tx + cam.dist * ce * Math.sin(cam.az),
+                      cam.ty + cam.dist * se,
+                      cam.tz + cam.dist * ce * Math.cos(cam.az));
+  camera.lookAt(cam.tx, cam.ty, cam.tz);
+}
+function setupOrbit() {
+  const el = renderer.domElement;
+  let down = false, lx = 0, ly = 0, pan = false;
+  el.style.touchAction = "none";
+  el.addEventListener("pointerdown", (e) => {
+    down = true; pan = e.button === 2 || e.shiftKey; lx = e.clientX; ly = e.clientY;
+    el.setPointerCapture(e.pointerId);
+  });
+  el.addEventListener("pointerup", (e) => { down = false; });
+  el.addEventListener("pointermove", (e) => {
+    if (!down) return;
+    const dx = e.clientX - lx, dy = e.clientY - ly;
+    lx = e.clientX; ly = e.clientY;
+    if (pan) {
+      const k = cam.dist * 0.0016;
+      cam.tx -= (dx * Math.cos(cam.az) - dy * Math.sin(cam.az) * Math.sin(cam.el)) * k;
+      cam.tz += (dx * Math.sin(cam.az) + dy * Math.cos(cam.az) * Math.sin(cam.el)) * k;
+    } else {
+      cam.az -= dx * 0.007;
+      cam.el = Math.max(-1.45, Math.min(1.45, cam.el + dy * 0.007));
+    }
+  });
+  el.addEventListener("wheel", (e) => {
+    e.preventDefault();
+    cam.dist = Math.max(0.8, Math.min(120, cam.dist * (1 + Math.sign(e.deltaY) * 0.12)));
+  }, { passive: false });
+  el.addEventListener("contextmenu", (e) => e.preventDefault());
+}
+function resize() {
+  if (!renderer) return;
+  const r = $("main").getBoundingClientRect();
+  renderer.setSize(r.width, r.height, false);
+  camera.aspect = r.width / Math.max(1, r.height);
+  camera.updateProjectionMatrix();
+}
+
+async function render(s) {
+  $("empty").style.display = "none";
+  $("hud").style.display = "block";
+  $("plan").style.display = "block";
+  $("tools").style.display = "flex";
+  $("hName").textContent = s.name || s.id;
+  const st = s.stats || {};
+  $("hTable").innerHTML = [
+    ["Floor area", (st.area_m2 || 0).toFixed(2) + " m²"],
+    ["Perimeter", (st.perimeter_m || 0).toFixed(2) + " m"],
+    ["Ceiling", (st.ceiling_m || 0).toFixed(2) + " m"],
+    ["Volume", (st.volume_m3 || 0).toFixed(2) + " m³"],
+    ["Corners", st.corners || 0],
+    ["Openings", st.openings || 0],
+    ["Triangles", st.triangles || 0],
+    ["Method", (s.meta && s.meta.mode) || "—"],
+    ["Ceiling from", (s.meta && s.meta.ceilingMeasured) || "—"],
+    ["Stations", (s.stations || []).length],
+  ].map(([k, v]) => `<tr><td class="k">${k}</td><td>${v}</td></tr>`).join("");
+
+  const base = FILES + "/RoomScans/" + encodeURIComponent(s.id) + "/";
+  $("dGlb").href = base + "room.glb";
+  $("dObj").href = base + "room.obj";
+  $("dSvg").href = base + "plan.svg";
+
+  drawPlan(s);
+  if (!(await initThree())) return;
+  if (roomGroup) { scene.remove(roomGroup); disposeGroup(roomGroup); }
+  roomGroup = buildRoom(s);
+  scene.add(roomGroup);
+  applyToggles();
+  const xs = s.floor.map((p) => p[0]), ys = s.floor.map((p) => p[1]);
+  cam.tx = (Math.min(...xs) + Math.max(...xs)) / 2;
+  cam.tz = -(Math.min(...ys) + Math.max(...ys)) / 2;
+  cam.ty = s.ceiling / 2;
+  cam.dist = 1.9 * Math.max(3, Math.max(Math.max(...xs) - Math.min(...xs),
+                                        Math.max(...ys) - Math.min(...ys)));
+  err("");
+}
+
+function disposeGroup(g) {
+  g.traverse((o) => {
+    if (o.geometry) o.geometry.dispose();
+    if (o.material) (Array.isArray(o.material) ? o.material : [o.material]).forEach((m) => m.dispose());
+  });
+}
+
+function applyToggles() {
+  if (!roomGroup) return;
+  roomGroup.traverse((o) => {
+    if (o.name === "ceiling") o.visible = show.ceiling;
+    if (o.name === "walls") o.visible = show.walls;
+  });
+  for (const [id, k] of [["tCeil", "ceiling"], ["tWalls", "walls"], ["tLabels", "labels"]]) {
+    const el = $(id);
+    el.classList.toggle("off", !show[k]);
+    el.querySelector(".sw").textContent = show[k] ? "ON" : "OFF";
+  }
+  if (current) drawPlan(current);
+}
+
+/* ---------------------------------------------------------- floor plan */
+function drawPlan(s) {
+  const c = $("planc"), ctx = c.getContext("2d");
+  const dpr = Math.min(2, devicePixelRatio || 1);
+  const W = 300, H = 230;
+  c.width = W * dpr; c.height = H * dpr;
+  c.style.width = W + "px"; c.style.height = H + "px";
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.clearRect(0, 0, W, H);
+  const pts = s.floor;
+  const xs = pts.map((p) => p[0]), ys = pts.map((p) => p[1]);
+  const pad = 30;
+  const minx = Math.min(...xs), maxx = Math.max(...xs);
+  const miny = Math.min(...ys), maxy = Math.max(...ys);
+  const sc = Math.min((W - pad * 2) / Math.max(.4, maxx - minx),
+                      (H - pad * 2) / Math.max(.4, maxy - miny));
+  const X = (x) => (W - (maxx - minx) * sc) / 2 + (x - minx) * sc;
+  const Y = (y) => (H + (maxy - miny) * sc) / 2 - (y - miny) * sc;
+  ctx.beginPath();
+  pts.forEach((p, i) => i ? ctx.lineTo(X(p[0]), Y(p[1])) : ctx.moveTo(X(p[0]), Y(p[1])));
+  ctx.closePath();
+  ctx.fillStyle = "rgba(255,140,66,.13)"; ctx.fill();
+  ctx.strokeStyle = "#ff8c42"; ctx.lineWidth = 2; ctx.lineJoin = "round"; ctx.stroke();
+  const n = pts.length;
+  for (const o of (s.openings || [])) {
+    const a = pts[o.wall], b = pts[(o.wall + 1) % n];
+    const L = Math.hypot(b[0] - a[0], b[1] - a[1]) || 1;
+    const ux = (b[0] - a[0]) / L, uy = (b[1] - a[1]) / L;
+    ctx.beginPath();
+    ctx.moveTo(X(a[0] + ux * o.u0), Y(a[1] + uy * o.u0));
+    ctx.lineTo(X(a[0] + ux * o.u1), Y(a[1] + uy * o.u1));
+    ctx.strokeStyle = o.type === "door" ? "#46e0d6" : "#ffd166";
+    ctx.lineWidth = 4; ctx.stroke();
+  }
+  if (show.labels) {
+    ctx.font = "10px Consolas,monospace"; ctx.fillStyle = "#e6edf3";
+    ctx.textAlign = "center"; ctx.textBaseline = "middle";
+    for (let i = 0; i < n; i++) {
+      const a = pts[i], b = pts[(i + 1) % n];
+      const L = Math.hypot(b[0] - a[0], b[1] - a[1]);
+      if (L * sc < 26) continue;
+      ctx.fillText(L.toFixed(2), X((a[0] + b[0]) / 2), Y((a[1] + b[1]) / 2));
+    }
+  }
+  ctx.fillStyle = "#ff5d5d";
+  for (const st of (s.stations || [])) {
+    ctx.beginPath(); ctx.arc(X(st.x), Y(st.y), 3, 0, 6.284); ctx.fill();
+  }
+}
+
+/* ------------------------------------------------------------------ wire */
+$("tCeil").onclick = () => { show.ceiling = !show.ceiling; applyToggles(); };
+$("tWalls").onclick = () => { show.walls = !show.walls; applyToggles(); };
+$("tLabels").onclick = () => { show.labels = !show.labels; applyToggles(); };
+
+loadInfo();
+loadList(false);
+setInterval(() => loadList(true), 4000);
+</script>
+</body>
+</html>
