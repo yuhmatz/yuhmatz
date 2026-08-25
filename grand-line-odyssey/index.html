@@ -2368,7 +2368,10 @@ addEventListener('mousemove', e => {
 document.addEventListener('pointerlockchange', () => {
   INPUT.mouse.locked = document.pointerLockElement === canvas;
 });
-canvas.addEventListener('click', () => { if (world.started && !world.paused && !UI.modal) canvas.requestPointerLock(); });
+/* pointer lock is a nice-to-have: sandboxed frames refuse it and we fall back to drag-look */
+function lockPointer() { try { if (canvas.requestPointerLock) canvas.requestPointerLock(); } catch (e) { } }
+function unlockPointer() { try { if (document.exitPointerLock) document.exitPointerLock(); } catch (e) { } }
+canvas.addEventListener('click', () => { if (world.started && !world.paused && !UI.modal) lockPointer(); });
 addEventListener('blur', () => { INPUT.keys = {}; INPUT.mouse.left = INPUT.mouse.right = false; });
 
 /* ======================================================================
@@ -4263,7 +4266,7 @@ const Dialogue = {
     this.queue = lines.slice(); this.onEnd = onEnd || null;
     this.active = true; this.el.classList.remove('hidden');
     UI.modal = true;
-    document.exitPointerLock && document.exitPointerLock();
+    unlockPointer();
     this.next();
   },
   next() {
@@ -4973,7 +4976,7 @@ const UI = {
     this.closeAll(true);
     $(id).classList.remove('hidden');
     this.modal = true; world.paused = true;
-    document.exitPointerLock && document.exitPointerLock();
+    unlockPointer();
     if (id === 'crewscreen') this.refreshCrew();
     if (id === 'skillscreen') this.refreshSkills();
     if (id === 'mapscreen') this.drawWorldMap();
@@ -4994,7 +4997,7 @@ const UI = {
         <div class="kv"><span>Time at sea</span><b>${Math.floor(P.playTime / 60)}m ${Math.floor(P.playTime % 60)}s</b></div>`;
       $('pause').classList.remove('hidden');
       this.modal = true; world.paused = true;
-      document.exitPointerLock && document.exitPointerLock();
+      unlockPointer();
     } else this.closeAll();
   },
   updateCompass() { },
@@ -5314,7 +5317,7 @@ function onPlayerDeath() {
   setTimeout(() => {
     $('gameover').classList.remove('hidden');
     UI.modal = true;
-    document.exitPointerLock && document.exitPointerLock();
+    unlockPointer();
   }, 900);
 }
 function respawnPlayer() {
@@ -5435,7 +5438,7 @@ function startGame(cont) {
   Quests.refresh();
   CAM.tx = P.x; CAM.ty = P.y + 1.5; CAM.tz = P.z;
   CAM.yaw = P.ry; CAM.pitch = -0.2; CAM.dist = CAM.targetDist = 8.2;
-  canvas.requestPointerLock && canvas.requestPointerLock();
+  lockPointer();
   if (!loaded) {
     Dialogue.start([
       { who: 'Ten years ago', text: 'A red-haired pirate gave a boy his straw hat, and told him to return it when he had become a greater pirate than himself.' },
