@@ -106,14 +106,29 @@ Saves are automatic every 45 seconds into `localStorage`, plus a manual save fro
 
 `index.html` is a single ~5,600-line file with a purpose-built WebGL2 engine inside it:
 
-- **Renderer** — five GLSL programs (instanced meshes, terrain, ocean, sky, particles). Every
-  prop, character, ship and limb in the world is drawn from six primitives batched into a
-  handful of instanced draw calls; a typical frame collects ~1,300 instances in about 0.6 ms of
-  CPU time.
+- **Renderer** — a deferred-lit-looking forward pipeline in ten GLSL programs. Every prop,
+  character, ship and limb is drawn from six primitives batched into a handful of instanced draw
+  calls; a typical frame collects ~1,300 instances in about 0.6 ms of CPU time.
+- **Shadows** — a 2048² directional shadow map, fitted to the play area each frame and snapped to
+  whole texels so the edges don't crawl, sampled with 3×3 hardware PCF and faded out at the map
+  border. Front-face culling plus a polygon offset keeps it free of acne and peter-panning.
+- **Anime shading** — a soft three-tone cel ramp instead of smooth lambert, a tight specular
+  band, a fresnel rim, and ink outlines drawn as expanded back-face shells whose thickness stays
+  constant on screen and fades out with distance.
+- **Lighting** — analytic sun by day and a real moon key light after dusk, hemispheric ambient,
+  and up to eight dynamic point lights gathered per frame for lamp posts, the lighthouse, poison
+  clouds, ship lanterns and Gear Second's steam.
+- **Post** — the scene renders into a 4× MSAA half-float target, resolves, then runs a bright
+  pass, a separable two-iteration bloom, crepuscular rays traced toward the sun, an ACES tone
+  map, saturation, a night-vision desaturation curve and a vignette.
+- **Quality** — Low / Medium / High presets (shadow resolution, MSAA, bloom) chosen automatically
+  from the running frame time, and overridable from the pause menu.
 - **World** — seeded value-noise fbm builds each island's 145 × 145 heightmap with a wobbled
   coastline, biome-coloured vertices with baked ambient occlusion, and a scattered prop set with
   collision volumes. A 1536 × 768 depth texture of the whole world feeds the ocean shader so
-  wave damping, shallow-water colour and surf line up with the real shoreline.
+  wave damping, shallow-water colour and surf line up with the real shoreline. Shallow water is
+  alpha-blended so the sand reads through it, the sea floor gets animated caustics, and foliage
+  bends under a wind field that strengthens with the sea state.
 - **Characters** — no imported models. Every character is a small transform hierarchy of boxes,
   cylinders and low-poly spheres, posed each frame by a procedural animation state machine
   (idle, walk, run, attack, hurt, guard, downed). Luffy's arms literally stretch by scaling the
