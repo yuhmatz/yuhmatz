@@ -67,9 +67,20 @@ dash storm, Krieg's armour and MH5 gas, Arlong's tooth-gun barrage, Smoker's int
 passives), a bounty that rises as you beat captains, berries from chests and defeated crews,
 purchasable stat upgrades in Loguetown, and a Log Pose that always points at your objective.
 
-**A crew.** Zoro, Nami, Usopp and Sanji join across the story. They flank you, fight on their
-own, can be knocked down and get back up, stand on the deck when you sail, and each grants a
-passive bonus (Usopp reloads cannons faster, Sanji cooks between fights, and so on).
+**A crew you can tell apart at a glance.** Zoro, Nami, Usopp and Sanji join across the story.
+They flank you, fight on their own, can be knocked down and get back up, stand on the deck when
+you sail, and each grants a passive bonus (Usopp reloads cannons faster, Sanji cooks between
+fights, and so on).
+
+![Crew](docs/06-crew.png)
+
+Every character is built from primitives with their own signature parts: Luffy's straw hat, open
+vest and scar; Zoro's three-spike green hair, haramaki and the three sheathed swords on his hip
+(one only comes out when he swings); Nami's striped shirt and Log Pose; Usopp's long nose,
+bandana, overalls and satchel; Sanji's suit, curled brow and cigarette. The bosses read the same
+way — Morgan's axe arm and steel jaw, Buggy's clown hat and red nose, Kuro's claws and
+spectacles, Krieg's spiked gold armour, Arlong's saw nose and shark teeth, Smoker's twin cigars
+and jitte.
 
 **Devil Fruit weakness.** Luffy sinks. Fall into deep water and you lose control, take damage,
 and have to be dragged out — a crew pulls you out faster than the tide does.
@@ -106,7 +117,13 @@ Saves are automatic every 45 seconds into `localStorage`, plus a manual save fro
 - **Characters** — no imported models. Every character is a small transform hierarchy of boxes,
   cylinders and low-poly spheres, posed each frame by a procedural animation state machine
   (idle, walk, run, attack, hurt, guard, downed). Luffy's arms literally stretch by scaling the
-  limb segments.
+  limb segments. One shared rig covers proportions, faces and clothing; each character then adds
+  a `detail()` pass that hangs their signature parts off the rig's own bone matrices.
+- **Ships** — hulls are built from tapered planks with a sheer line that rises fore and aft, a real
+  draft so they sit *in* the water, a painted waterline and billboarded foam along it. Each vessel
+  has its own character: the Going Merry's sheep figurehead, front lawn and straw-hat sail; the
+  Marines' white hull, ram and seagull ensign; the pirates' skull prow and gun ports; the starter
+  dinghy's oars.
 - **Audio** — WebAudio only. Sound effects are synthesised oscillators and filtered noise; the
   soundtrack is a generative sequencer with per-context scales and tempos that switches between
   village, sailing, battle and boss music.
