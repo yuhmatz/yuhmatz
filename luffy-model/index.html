@@ -1846,6 +1846,15 @@ el("btnObj").addEventListener("click", () => {
   setTimeout(() => URL.revokeObjectURL(a.href), 4000);
 });
 
+/* Embedded in a sandboxed frame the browser refuses downloads outright, so
+   rather than leave a dead control, drop it and say where the export lives. */
+if (window.self !== window.top) {
+  el("btnObj").remove();
+  el("btnFront").parentElement.style.gridTemplateColumns = "1fr";
+  el("hint").insertAdjacentHTML("beforeend",
+    "<br><span style=\"opacity:.7\">OBJ export when opened as a file</span>");
+}
+
 /* ---- go ---------------------------------------------------------------- */
 frame();
 resize();
