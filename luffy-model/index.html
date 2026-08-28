@@ -274,8 +274,8 @@ const M = {
 
 /* base colour, roughness, subsurface weight — consumed by the shader */
 const MATS = [
-  { c: [0.867, 0.632, 0.442], rough: 0.66, sss: 1.00 }, // skin, East-Blue tan
-  { c: [0.133, 0.118, 0.114], rough: 0.42, sss: 0.00 }, // hair
+  { c: [0.914, 0.706, 0.560], rough: 0.66, sss: 1.00 }, // skin, light warm peach
+  { c: [0.133, 0.118, 0.114], rough: 0.68, sss: 0.00 }, // hair
   { c: [0.749, 0.196, 0.153], rough: 0.74, sss: 0.15 }, // vest
   { c: [0.184, 0.353, 0.573], rough: 0.80, sss: 0.10 }, // shorts
   { c: [0.796, 0.757, 0.663], rough: 0.84, sss: 0.10 }, // shorts cuff
@@ -285,9 +285,9 @@ const MATS = [
   { c: [0.686, 0.196, 0.161], rough: 0.72, sss: 0.10 }, // hat band
   { c: [0.949, 0.937, 0.914], rough: 0.16, sss: 0.20 }, // sclera
   { c: [0.078, 0.066, 0.062], rough: 0.10, sss: 0.00 }, // iris
-  { c: [0.195, 0.090, 0.086], rough: 0.42, sss: 0.60 }, // mouth
+  { c: [0.180, 0.125, 0.110], rough: 0.42, sss: 0.60 }, // mouth
   { c: [0.918, 0.902, 0.871], rough: 0.22, sss: 0.30 }, // teeth
-  { c: [0.545, 0.314, 0.268], rough: 0.55, sss: 0.90 }, // scar
+  { c: [0.431, 0.259, 0.224], rough: 0.55, sss: 0.90 }, // scar
   { c: [1.000, 1.000, 1.000], rough: 0.05, sss: 0.00 }  // eye glint
 ];
 
@@ -302,8 +302,8 @@ const MODEL = { hat: true, height: 1.74 };
 const BOUNDS = { x0: -0.33, y0: -0.02, z0: -0.29, x1: 0.33, y1: 1.87, z1: 0.29 };
 
 /* Everything above the collar is built at a canonical size and then scaled
-   about the base of the neck: a shade under seven heads to the crown, which
-   is how the character is drawn. */
+   about the base of the neck: just under six heads to the crown, which is
+   how the character is drawn — the head is deliberately large. */
 const HS = 1.093, HP = 1.4650, HTY = 0.070, HTZ = -0.042;
 const HCY = Math.cos(HTY), HSY = Math.sin(HTY);
 const HCZ = Math.cos(HTZ), HSZ = Math.sin(HTZ);
@@ -424,7 +424,7 @@ function sdHeadL(x, y, z) {
   /* the grin: a shallow depression in bent space, again painted rather than
      carved through */
   const mby = y - (MOUTH_Y + MOUTH_CURVE * x * x);
-  d = smax(d, -sdEllipsoid(x, mby, z, 0, 0, 0.1130, 0.0560, 0.0196, 0.0235), 0.020);
+  d = smax(d, -sdEllipsoid(x, mby, z, 0, 0, 0.1130, 0.0508, 0.0182, 0.0235), 0.020);
   d = smin(d, sdCone(x, y, z, -0.018, 1.4890, 0.0700, 0.018, 1.4890, 0.0700, 0.0066, 0.0066), 0.034);
 
   return d;
@@ -438,9 +438,9 @@ function hairLine(x, z) {
   const r = Math.max(len2(dx, dz), 1e-5);
   const c = dz / r;                                  /* 1 = front, -1 = nape */
   const f = Math.max(c, 0), b = Math.max(-c, 0);
-  let yh = 1.6140 + 0.0500 * f * f * (2 - f) - 0.0680 * b;
+  let yh = 1.6140 + 0.0450 * f * f * (2 - f) - 0.0680 * b;
   const ang = Math.atan2(dx, dz);
-  yh -= 0.0250 * f * Math.pow(0.5 + 0.5 * Math.cos(11 * ang), 0.75);   /* fringe points */
+  yh -= 0.0215 * f * Math.pow(0.5 + 0.5 * Math.cos(11 * ang), 0.90);   /* fringe points */
   return yh;
 }
 
@@ -450,9 +450,9 @@ function sdHairL(x, y, z) {
   const ax = Math.abs(x);
 
   const outer = headCore(x, y, z, 0.0205);
-  const inner = headCore(x, y, z, 0.0025);
+  const inner = headCore(x, y, z, -0.0035);
   let d = smax(outer, -inner, 0.006);
-  d = smax(d, (hairLine(x, z) - y) * 0.42, 0.007);
+  d = smax(d, (hairLine(x, z) - y) * 0.42, 0.012);
 
   /* sideburn points in front of the ears */
   let s = sdCone(ax, y, z, 0.0925, 1.6180, 0.0330, 0.0880, 1.5810, 0.0450, 0.0135, 0.0030);
@@ -555,17 +555,18 @@ function sdHatStrawL(x, y, z) {
 
   /* brim: a disc whose mid-surface droops toward the rim, with a faint
      radial ripple standing in for the weave */
-  const t = rr / HAT_R;
-  const y0 = HAT_Y0 - 0.0340 * t * t;
-  const th = 0.0026 + 0.0006 * Math.cos(rr * 150);
+  const t = rr / HAT_R, t2 = t * t;
+  const y0 = HAT_Y0 - 0.0300 * t2 + 0.0230 * t2 * t2 * t2;
+  const th = 0.0022 + 0.0004 * Math.cos(rr * 150);
   const dy = Math.abs(hy - y0) - th;
-  const dx = rr - (HAT_R - 0.0055);
+  const dx = rr - (HAT_R - 0.0042);
   const brim = Math.min(Math.max(dx, dy), 0)
-             + len2(Math.max(dx, 0), Math.max(dy, 0)) - 0.0055;
+             + len2(Math.max(dx, 0), Math.max(dy, 0)) - 0.0042;
 
-  /* crown: sleeves down over the skull, softly domed on top */
-  let crown = sdCone(hx, hy, hz, 0, HAT_Y0 - 0.004, 0, 0, -0.0085, 0, 0.1090, 0.0985);
-  crown = Math.max(crown, hy + 0.0085) - 0.0085;
+  /* crown: sleeves down over the skull, then a big cap sphere rounds the
+     top into a shallow dome instead of clipping it flat */
+  let crown = sdCone(hx, hy, hz, 0, HAT_Y0 - 0.004, 0, 0, -0.0210, 0, 0.1090, 0.0930);
+  crown = Math.max(crown, sdSphere(hx, hy, hz, 0, -0.3800, 0, 0.3715)) - 0.0085;
 
   return smin(brim, crown, 0.016);
 }
@@ -574,7 +575,7 @@ function sdHatBandL(x, y, z) {
   const b = len3(x - HAT.x, y - (HAT.y - 0.06), z - HAT.z) - 0.190;
   if (b > 0.05) return b;
   hatLocal(x, y, z, _hl);
-  return sdTorusY(_hl[0], _hl[1], _hl[2], 0, -0.0530, 0, 0.1150, 0.0130);
+  return sdTorusY(_hl[0], _hl[1], _hl[2], 0, -0.0480, 0, 0.1080, 0.0098);
 }
 
 /* ==========================================================================
@@ -653,13 +654,13 @@ function faceMaterial(wx, wy, wz, base) {
     const inv = 1 / Math.max(len3(ex, ey, ez), 1e-6);
     const ux = ex * inv, uy = ey * inv, uz = ez * inv;
     if (ux * -0.1893 * Math.sign(x) + uy * 0.4464 + uz * 0.8746 > 0.9914) return M.GLINT;
-    if (uy * 0.1500 + uz * 0.9887 > 0.8200) return M.IRIS;
+    if (uy * 0.1900 + uz * 0.9818 > 0.8300) return M.IRIS;
     return M.SCLERA;
   }
   if (Math.max(cap2(ax, y, 0.0330, 1.6215, 0.0715, 1.6285, 0.0048, 0.0028), 0.020 - z) < 0) return M.HAIR;
   const mby = y - (MOUTH_Y + MOUTH_CURVE * x * x);
-  if (sdEllipsoid(x, mby, z, 0, 0.0016, 0.0800, 0.0478, 0.0126, 0.0420) < 0) return M.TEETH;
-  if (sdEllipsoid(x, mby, z, 0, 0, 0.0800, 0.0530, 0.0166, 0.0430) < 0) return M.MOUTH;
+  if (sdEllipsoid(x, mby, z, 0, 0.0013, 0.0800, 0.0434, 0.0114, 0.0420) < 0) return M.TEETH;
+  if (sdEllipsoid(x, mby, z, 0, 0, 0.0800, 0.0482, 0.0150, 0.0430) < 0) return M.MOUTH;
   if (Math.max(cap2(x, y, 0.0625, 1.5484, 0.0625, 1.5585, 0.0012), 0.020 - z) < 0) return M.SCAR;
   return M.SKIN;
 }
@@ -1116,9 +1117,9 @@ const GLSL_FACE = `
 const vec3 C_HAIR   = vec3(0.133,0.118,0.114);
 const vec3 C_SCLERA = vec3(0.949,0.937,0.914);
 const vec3 C_IRIS   = vec3(0.078,0.066,0.062);
-const vec3 C_MOUTH  = vec3(0.195,0.090,0.086);
+const vec3 C_MOUTH  = vec3(0.180,0.125,0.110);
 const vec3 C_TEETH  = vec3(0.918,0.902,0.871);
-const vec3 C_SCAR   = vec3(0.545,0.314,0.268);
+const vec3 C_SCAR   = vec3(0.431,0.259,0.224);
 
 float aa(float d){ float w = max(fwidth(d), 1e-6) * 0.85; return 1.0 - smoothstep(-w, w, d); }
 
@@ -1150,7 +1151,7 @@ vec3 faceTint(vec3 w, vec3 base, float skin, inout float rough, inout float sss)
   vec3 u  = e3 / max(length(e3), 1e-5);
   float inEye = aa(ql - 1.0) * skin * step(0.030, p.z);
   vec3 eye = C_SCLERA;
-  eye = mix(eye, C_IRIS,   aa(0.8200 - dot(u, vec3(0.000, 0.1500, 0.9887))));
+  eye = mix(eye, C_IRIS,   aa(0.8300 - dot(u, vec3(0.000, 0.1900, 0.9818))));
   eye = mix(eye, C_HAIR,   aa(0.775 - q.y));
   eye = mix(eye, C_HAIR,   1.0 - aa(ql - 0.925));
   eye = mix(eye, vec3(1.0), aa(0.9914 - dot(u, vec3(-0.1893 * sign(p.x), 0.4464, 0.8746))));
@@ -1161,8 +1162,8 @@ vec3 faceTint(vec3 w, vec3 base, float skin, inout float rough, inout float sss)
 
   float mby = p.y - (1.5100 + 6.0 * p.x * p.x);
   vec3  pm  = vec3(p.x, mby, p.z);
-  float lip   = aa(sdEll(pm, vec3(0.0, 0.0,    0.0800), vec3(0.0530, 0.0166, 0.0430))) * skin;
-  float teeth = aa(sdEll(pm, vec3(0.0, 0.0016, 0.0800), vec3(0.0478, 0.0126, 0.0420))) * skin;
+  float lip   = aa(sdEll(pm, vec3(0.0, 0.0,    0.0800), vec3(0.0482, 0.0150, 0.0430))) * skin;
+  float teeth = aa(sdEll(pm, vec3(0.0, 0.0013, 0.0800), vec3(0.0434, 0.0114, 0.0420))) * skin;
 
   col = mix(col, C_MOUTH,  lip);
   col = mix(col, C_TEETH,  teeth);
