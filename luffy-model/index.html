@@ -648,12 +648,12 @@ function faceMaterial(wx, wy, wz, base) {
   const ql = len2(qx, qy);
   if (ql < 1 && z > 0.030) {
     if (ql > 0.925) return M.HAIR;                             /* eye liner */
-    if (qy > 0.62) return M.HAIR;                              /* upper lash */
+    if (qy > 0.775) return M.HAIR;                             /* upper lash */
     const ex = (ax - 0.0520) / 0.0375, ey = (y - 1.5885) / 0.0310, ez = (z - 0.0555) / 0.0345;
     const inv = 1 / Math.max(len3(ex, ey, ez), 1e-6);
     const ux = ex * inv, uy = ey * inv, uz = ez * inv;
-    if (ux * -0.255 + uy * 0.300 + uz * 0.919 > 0.9890) return M.GLINT;
-    if (ux * 0.090 - uy * 0.115 + uz * 0.989 > 0.7350) return M.IRIS;
+    if (ux * -0.1893 * Math.sign(x) + uy * 0.4464 + uz * 0.8746 > 0.9914) return M.GLINT;
+    if (uy * 0.1500 + uz * 0.9887 > 0.8200) return M.IRIS;
     return M.SCLERA;
   }
   if (Math.max(cap2(ax, y, 0.0185, 1.6100, 0.0800, 1.6180, 0.0084, 0.0044), 0.020 - z) < 0) return M.HAIR;
@@ -1150,10 +1150,10 @@ vec3 faceTint(vec3 w, vec3 base, float skin, inout float rough, inout float sss)
   vec3 u  = e3 / max(length(e3), 1e-5);
   float inEye = aa(ql - 1.0) * skin * step(0.030, p.z);
   vec3 eye = C_SCLERA;
-  eye = mix(eye, C_IRIS,   aa(0.7350 - dot(u, vec3(0.090, -0.115, 0.989))));
-  eye = mix(eye, C_HAIR,   aa(0.620 - q.y));
+  eye = mix(eye, C_IRIS,   aa(0.8200 - dot(u, vec3(0.000, 0.1500, 0.9887))));
+  eye = mix(eye, C_HAIR,   aa(0.775 - q.y));
   eye = mix(eye, C_HAIR,   1.0 - aa(ql - 0.925));
-  eye = mix(eye, vec3(1.0), aa(0.9890 - dot(u, vec3(-0.255, 0.300, 0.919))));
+  eye = mix(eye, vec3(1.0), aa(0.9914 - dot(u, vec3(-0.1893 * sign(p.x), 0.4464, 0.8746))));
 
   float front = step(0.020, p.z) * skin;
   float brow  = aa(cap2(vec2(ax, p.y), vec2(0.0185, 1.6100), vec2(0.0800, 1.6180), 0.0084, 0.0044)) * front;
