@@ -66,7 +66,9 @@ slight angle instead of staring dead ahead.
 **The face is painted, not cut.** The eyes, brows, lips, teeth and the scar under
 his left eye are decided per fragment from the world position, analytically
 antialiased against the pixel footprint. They stay razor sharp no matter how coarse
-the mesh is, and they cost nothing in triangles.
+the mesh is, and they cost nothing in triangles. The red band on the hat is painted
+the same way: as a ring in the hat's own frame, so its edge is a line rather than a
+staircase of whole vertices running across a curved brim.
 
 ![Wireframe](docs/06-wire.png)
 
@@ -100,8 +102,13 @@ The field is polygonised by **dual contouring** over a block-sparse grid:
 | Density | Voxel | Triangles | Field samples |
 | --- | --- | --- | --- |
 | Draft | 9.5 mm | ~105 k | 0.5 M |
-| Fine | 5.8 mm | ~276 k | 1.5 M |
+| Fine | 5.8 mm | ~275 k | 1.5 M |
 | Ultra | 4.2 mm | ~530 k | 2.9 M |
+
+Where two parts meet the nearest-material test can flip from voxel to voxel — the
+hair is trimmed to stop at the hat, so along that seam the two fields are within a
+hair's breadth of each other. The hat carries a 2 mm advantage in that test, which
+puts the boundary where one surface is unambiguously closer.
 
 ![Occlusion](docs/05-occlusion.png)
 

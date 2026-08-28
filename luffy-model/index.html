@@ -462,7 +462,13 @@ function sdHairL(x, y, z) {
   s = Math.min(s, sdCone(x, y, z, 0.068, 1.6280, -0.090, 0.106, 1.6180, -0.142, 0.0145, 0.0060));
   s = Math.min(s, sdCone(x, y, z, 0.000, 1.5600, -0.094, 0.000, 1.5230, -0.080, 0.0265, 0.0105));
 
-  return smin(d, s, 0.012);
+  d = smin(d, s, 0.012);
+
+  /* Hair and hat interpenetrate around the brim, and the union surface there
+     alternates between the two every voxel — the torn black sawtooth along
+     the brim in every close-up. Trim the hair to clear the hat instead. */
+  if (MODEL.hat) d = smax(d, -sdHatStrawL(x, y, z), 0.0035);
+  return d;
 }
 
 /* ---- vest -------------------------------------------------------------- */
@@ -633,8 +639,13 @@ function materialAt(x, y, z) {
   test(sdSole(x, y, z), M.SOLE);
   test(sdStrap(x, y, z), M.SANDAL);
   if (MODEL.hat) {
-    test(sdHatStraw(x, y, z), M.STRAW);
-    test(sdHatBand(x, y, z), M.BAND);
+    /* The hair is carved to stop at the hat, so along that seam the two
+       fields are within a hair's breadth of each other and the nearest-wins
+       test flips every voxel — a black sawtooth eating into the brim. Give
+       the hat a 2 mm advantage so the boundary lands where one surface is
+       unambiguously closer. */
+    test(sdHatStraw(x, y, z) - 0.0020, M.STRAW);
+    test(sdHatBand(x, y, z) - 0.0020, M.BAND);
   }
   return mat;
 }
@@ -1137,11 +1148,33 @@ float cap2(vec2 p, vec2 a, vec2 b, float r0, float r1){
 
 /* the marks that are painted on skin rather than modelled into it */
 const float HS = 1.093, HP = 1.4650, HTY = 0.070, HTZ = -0.042;
-vec3 faceTint(vec3 w, vec3 base, float skin, inout float rough, inout float sss){
+
+/* world -> head space: the same scale-about-the-neck and tilt the model is
+   built with, so anything painted here lands on the geometry it belongs to */
+vec3 toHeadSpace(vec3 w){
   float cy = cos(HTY), sy = sin(HTY), cz = cos(HTZ), sz = sin(HTZ);
   float py = w.y - HP;
   float ux = w.x * cy - w.z * sy, uz = w.x * sy + w.z * cy;
-  vec3 p = vec3((ux * cz + py * sz) / HS, (-ux * sz + py * cz) / HS + HP, uz / HS);
+  return vec3((ux * cz + py * sz) / HS, (-ux * sz + py * cz) / HS + HP, uz / HS);
+}
+
+const vec3 C_STRAW = vec3(0.851,0.714,0.427);
+const vec3 C_BAND  = vec3(0.686,0.196,0.161);
+const float HAT_TILT = 0.190;
+
+/* The band is a ring in the hat's own frame. Left to the mesh, its edge is a
+   staircase of whole vertices across a curved surface; decided here it is a
+   clean line at any density — the same trick the face marks use. */
+vec3 hatTint(vec3 w, vec3 base, float onHat){
+  vec3 q = toHeadSpace(w) - vec3(0.0, 1.7570, -0.0330);
+  float c = cos(HAT_TILT), s = sin(HAT_TILT);
+  vec3 h = vec3(q.x, q.y * c - q.z * s, q.y * s + q.z * c);
+  float d = length(vec2(length(h.xz) - 0.1080, h.y + 0.0480)) - 0.0098;
+  return mix(base, mix(C_STRAW, C_BAND, aa(d - 0.0016)), onHat);
+}
+
+vec3 faceTint(vec3 w, vec3 base, float skin, inout float rough, inout float sss){
+  vec3 p = toHeadSpace(w);
   float ax = abs(p.x);
   vec3 col = base;
 
@@ -1264,8 +1297,9 @@ void main(){
   vec3 base = vCol.rgb;
   float rough = vAux.x, sss = vAux.y;
   if (uMode == 0) {
-    float skin = 1.0 - step(0.5, vAux.w * 255.0);
-    base = faceTint(vPos, base, skin, rough, sss);
+    float mid = vAux.w * 255.0;
+    base = faceTint(vPos, base, 1.0 - step(0.5, mid), rough, sss);
+    base = hatTint(vPos, base, step(6.5, mid) * (1.0 - step(8.5, mid)));
   } else {
     base = vec3(0.700, 0.686, 0.666); rough = 0.66; sss = 0.0;
   }
