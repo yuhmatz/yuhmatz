@@ -1,0 +1,1856 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Straw Hat Study</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,600;12..96,800&family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600&display=swap">
+<style>
+:root{
+  --void:#0B0D10; --panel:#14171C; --panel2:#1A1E25; --line:#252B34;
+  --ink:#E7E9ED; --muted:#8A929E; --dim:#5C6470;
+  --straw:#E9B949; --scar:#C3372E; --jade:#5FBF8F;
+  --display:"Bricolage Grotesque",Georgia,serif;
+  --ui:"IBM Plex Sans",system-ui,sans-serif;
+  --mono:"IBM Plex Mono",ui-monospace,monospace;
+}
+*{box-sizing:border-box;margin:0;padding:0}
+html,body{height:100%;overflow:hidden;background:var(--void);color:var(--ink);font-family:var(--ui)}
+canvas#view{position:fixed;inset:0;width:100%;height:100%;display:block;background:var(--void)}
+.chrome{position:fixed;pointer-events:none;z-index:5}
+.chrome > *{pointer-events:auto}
+
+/* ---------- title block ---------- */
+#brand{top:22px;left:26px;display:flex;flex-direction:column;gap:6px}
+#brand h1{
+  font-family:var(--display);font-weight:800;font-size:23px;letter-spacing:-0.015em;line-height:1;
+  text-wrap:balance;
+}
+#brand h1 em{font-style:normal;color:var(--straw)}
+#brand .sub{
+  font-size:11px;letter-spacing:.16em;text-transform:uppercase;color:var(--dim);
+  display:flex;align-items:center;gap:8px;
+}
+#brand .sub b{color:var(--muted);font-weight:500}
+
+/* ---------- control rail ---------- */
+#rail{
+  top:96px;left:26px;width:216px;display:flex;flex-direction:column;gap:18px;
+  background:color-mix(in srgb,var(--panel) 88%,transparent);
+  border:1px solid var(--line);border-radius:4px;padding:16px 15px;
+  backdrop-filter:blur(14px);
+}
+.group{display:flex;flex-direction:column;gap:8px}
+.group > label{
+  font-size:10px;letter-spacing:.18em;text-transform:uppercase;color:var(--dim);
+  display:flex;justify-content:space-between;align-items:baseline;
+}
+.group > label span{font-family:var(--mono);color:var(--muted);letter-spacing:0}
+.seg{display:grid;grid-template-columns:repeat(3,1fr);gap:3px}
+.seg.two{grid-template-columns:repeat(2,1fr)}
+.seg button{
+  font-family:var(--ui);font-size:11px;font-weight:500;color:var(--muted);
+  background:var(--panel2);border:1px solid var(--line);border-radius:3px;
+  padding:7px 4px;cursor:pointer;transition:.14s;
+}
+.seg button:hover{color:var(--ink);border-color:#39414d}
+.seg button[aria-pressed="true"]{background:var(--straw);border-color:var(--straw);color:#191307;font-weight:600}
+.seg button:focus-visible{outline:2px solid var(--straw);outline-offset:2px}
+input[type=range]{
+  -webkit-appearance:none;appearance:none;width:100%;height:2px;background:var(--line);border-radius:2px;cursor:pointer;
+}
+input[type=range]::-webkit-slider-thumb{
+  -webkit-appearance:none;width:12px;height:12px;border-radius:50%;background:var(--straw);border:0;cursor:pointer;
+}
+input[type=range]::-moz-range-thumb{width:12px;height:12px;border-radius:50%;background:var(--straw);border:0}
+input[type=range]:focus-visible{outline:2px solid var(--straw);outline-offset:4px}
+.check{display:flex;align-items:center;gap:8px;font-size:12px;color:var(--muted);cursor:pointer}
+.check input{accent-color:var(--straw);width:13px;height:13px;cursor:pointer}
+
+/* ---------- stats ---------- */
+#stats{
+  bottom:24px;left:26px;font-family:var(--mono);font-size:11px;color:var(--muted);
+  display:grid;grid-template-columns:auto auto;gap:3px 16px;
+  background:color-mix(in srgb,var(--panel) 84%,transparent);
+  border:1px solid var(--line);border-radius:4px;padding:12px 14px;backdrop-filter:blur(14px);
+  font-variant-numeric:tabular-nums;
+}
+#stats dt{color:var(--dim);letter-spacing:.06em}
+#stats dd{color:var(--ink);text-align:right}
+#stats dd.hi{color:var(--straw)}
+
+/* ---------- turntable readout ---------- */
+#gauge{
+  bottom:24px;right:26px;font-family:var(--mono);font-size:11px;color:var(--dim);
+  display:flex;align-items:center;gap:10px;letter-spacing:.08em;
+}
+#gauge .tick{width:52px;height:1px;background:linear-gradient(90deg,transparent,var(--line))}
+#gauge b{color:var(--muted);font-weight:500;font-variant-numeric:tabular-nums}
+
+#hint{
+  top:22px;right:26px;font-size:11px;color:var(--dim);text-align:right;line-height:1.9;letter-spacing:.02em;
+}
+#hint kbd{
+  font-family:var(--mono);font-size:10px;color:var(--muted);
+  border:1px solid var(--line);border-radius:3px;padding:1px 5px;background:var(--panel2);
+}
+
+/* ---------- build overlay ---------- */
+#build{
+  position:fixed;inset:0;z-index:20;background:var(--void);
+  display:flex;flex-direction:column;align-items:center;justify-content:center;gap:22px;
+}
+#build .mark{
+  font-family:var(--display);font-weight:800;font-size:clamp(30px,5vw,52px);letter-spacing:-.02em;
+}
+#build .mark em{font-style:normal;color:var(--straw)}
+#buildbar{width:min(340px,60vw);height:2px;background:var(--line);overflow:hidden}
+#buildbar i{display:block;height:100%;width:0;background:var(--straw);transition:width .18s ease-out}
+#buildstep{font-family:var(--mono);font-size:11px;color:var(--dim);letter-spacing:.1em;text-transform:uppercase}
+#build.done{opacity:0;pointer-events:none;transition:opacity .55s ease}
+#build.rebuild{background:color-mix(in srgb,var(--void) 72%,transparent);backdrop-filter:blur(5px);pointer-events:none}
+#build.rebuild .mark{display:none}
+
+@media (prefers-reduced-motion:reduce){*{animation:none!important;transition:none!important}}
+@media (max-width:820px){
+  #rail{width:186px;left:14px;top:88px;padding:13px 12px}
+  #brand{left:14px;top:16px}
+  #stats{left:14px;bottom:16px}
+  #gauge,#hint{display:none}
+}
+</style>
+</head>
+<body>
+<canvas id="view"></canvas>
+
+<div class="chrome" id="brand">
+  <h1>Monkey D. <em>Luffy</em></h1>
+  <div class="sub"><b>Procedural study</b> &middot; signed distance field &rarr; surface nets</div>
+</div>
+
+<div class="chrome" id="rail">
+  <div class="group">
+    <label>Shading</label>
+    <div class="seg" id="seg-shade">
+      <button data-v="0" aria-pressed="true">Final</button>
+      <button data-v="1" aria-pressed="false">Clay</button>
+      <button data-v="2" aria-pressed="false">Normals</button>
+    </div>
+    <div class="seg" id="seg-shade2">
+      <button data-v="3" aria-pressed="false">Occlusion</button>
+      <button data-v="4" aria-pressed="false">Curvature</button>
+      <button data-v="5" aria-pressed="false">Wire</button>
+    </div>
+  </div>
+
+  <div class="group">
+    <label>Mesh density <span id="resLabel">fine</span></label>
+    <div class="seg" id="seg-res">
+      <button data-v="0.0095" aria-pressed="false">Draft</button>
+      <button data-v="0.0058" aria-pressed="true">Fine</button>
+      <button data-v="0.0042" aria-pressed="false">Ultra</button>
+    </div>
+  </div>
+
+  <div class="group">
+    <label>Key light <span id="lightLabel">-22&deg;</span></label>
+    <input type="range" id="lightRot" min="-180" max="180" value="-22" step="1" aria-label="Key light rotation">
+  </div>
+
+  <div class="group">
+    <label>Focal length <span id="fovLabel">50mm</span></label>
+    <input type="range" id="fov" min="24" max="120" value="50" step="1" aria-label="Focal length">
+  </div>
+
+  <div class="group">
+    <label class="check"><input type="checkbox" id="spin" checked> Turntable</label>
+    <label class="check"><input type="checkbox" id="showGround" checked> Ground &amp; shadow</label>
+    <label class="check"><input type="checkbox" id="showHat" checked> Straw hat</label>
+  </div>
+
+  <div class="group">
+    <div class="seg two">
+      <button id="btnFront">Front</button>
+      <button id="btnObj">Save OBJ</button>
+    </div>
+  </div>
+</div>
+
+<dl class="chrome" id="stats">
+  <dt>triangles</dt><dd class="hi" id="stTris">&mdash;</dd>
+  <dt>vertices</dt><dd id="stVerts">&mdash;</dd>
+  <dt>voxel</dt><dd id="stVox">&mdash;</dd>
+  <dt>field samples</dt><dd id="stField">&mdash;</dd>
+  <dt>build</dt><dd id="stTime">&mdash;</dd>
+  <dt>height</dt><dd id="stHeight">&mdash;</dd>
+</dl>
+
+<div class="chrome" id="gauge"><span class="tick"></span>TURNTABLE <b id="gaugeVal">000&deg;</b></div>
+
+<div class="chrome" id="hint">
+  <kbd>drag</kbd> orbit &nbsp; <kbd>wheel</kbd> dolly<br>
+  <kbd>shift</kbd>+drag pan &nbsp; <kbd>F</kbd> frame
+</div>
+
+<div id="build">
+  <div class="mark">Straw Hat <em>Study</em></div>
+  <div id="buildbar"><i></i></div>
+  <div id="buildstep">warming up</div>
+</div>
+
+<script>
+"use strict";
+
+/* ==========================================================================
+   1 · Scalar SDF math
+   No vector objects anywhere: the field is evaluated a few million times per
+   build, so every primitive takes and returns plain numbers.
+   ========================================================================== */
+
+const clamp = (v, a, b) => (v < a ? a : v > b ? b : v);
+const len2  = (x, y)    => Math.sqrt(x * x + y * y);
+const len3  = (x, y, z) => Math.sqrt(x * x + y * y + z * z);
+
+/* polynomial smooth minimum / maximum — the joins between body parts */
+function smin(a, b, k) {
+  const h = clamp(0.5 + 0.5 * (b - a) / k, 0, 1);
+  return b + (a - b) * h - k * h * (1 - h);
+}
+function smax(a, b, k) {
+  const h = clamp(0.5 - 0.5 * (b - a) / k, 0, 1);
+  return b + (a - b) * h + k * h * (1 - h);
+}
+
+function sdSphere(x, y, z, cx, cy, cz, r) {
+  return len3(x - cx, y - cy, z - cz) - r;
+}
+
+/* exact-ish ellipsoid (Quilez): first-order corrected scaled sphere */
+function sdEllipsoid(x, y, z, cx, cy, cz, rx, ry, rz) {
+  const px = x - cx, py = y - cy, pz = z - cz;
+  const k0 = len3(px / rx, py / ry, pz / rz);
+  if (k0 < 1e-7) return -Math.min(rx, Math.min(ry, rz));
+  const k1 = len3(px / (rx * rx), py / (ry * ry), pz / (rz * rz));
+  return k0 * (k0 - 1) / k1;
+}
+
+/* round cone: a capsule whose radius tapers from r1 at a to r2 at b.
+   Every limb segment is one of these. */
+function sdCone(px, py, pz, ax, ay, az, bx, by, bz, r1, r2) {
+  const bax = bx - ax, bay = by - ay, baz = bz - az;
+  const l2 = bax * bax + bay * bay + baz * baz;
+  const rr = r1 - r2, a2 = l2 - rr * rr, il2 = 1 / l2;
+  const pax = px - ax, pay = py - ay, paz = pz - az;
+  const y = pax * bax + pay * bay + paz * baz;
+  const z = y - l2;
+  const vx = pax * l2 - bax * y, vy = pay * l2 - bay * y, vz = paz * l2 - baz * y;
+  const x2 = vx * vx + vy * vy + vz * vz;
+  const y2 = y * y * l2, z2 = z * z * l2;
+  const k = Math.sign(rr) * rr * rr * x2;
+  if (Math.sign(z) * a2 * z2 > k) return Math.sqrt(x2 + z2) * il2 - r2;
+  if (Math.sign(y) * a2 * y2 < k) return Math.sqrt(x2 + y2) * il2 - r1;
+  return (Math.sqrt(x2 * a2 * il2) + y * rr) * il2 - r1;
+}
+
+function sdTorusY(x, y, z, cx, cy, cz, R, r) {
+  return len2(len2(x - cx, z - cz) - R, y - cy) - r;
+}
+
+function sdRoundBox(x, y, z, cx, cy, cz, hx, hy, hz, r) {
+  const qx = Math.abs(x - cx) - hx, qy = Math.abs(y - cy) - hy, qz = Math.abs(z - cz) - hz;
+  return len3(Math.max(qx, 0), Math.max(qy, 0), Math.max(qz, 0))
+       + Math.min(Math.max(qx, Math.max(qy, qz)), 0) - r;
+}
+
+/* ==========================================================================
+   2 · Materials
+   ========================================================================== */
+
+const M = {
+  SKIN: 0, HAIR: 1, VEST: 2, SHORTS: 3, CUFF: 4, SANDAL: 5, SOLE: 6,
+  STRAW: 7, BAND: 8, SCLERA: 9, IRIS: 10, MOUTH: 11, TEETH: 12,
+  SCAR: 13, GLINT: 14
+};
+
+/* base colour, roughness, subsurface weight — consumed by the shader */
+const MATS = [
+  { c: [0.867, 0.632, 0.442], rough: 0.66, sss: 1.00 }, // skin, East-Blue tan
+  { c: [0.133, 0.118, 0.114], rough: 0.42, sss: 0.00 }, // hair
+  { c: [0.749, 0.196, 0.153], rough: 0.74, sss: 0.15 }, // vest
+  { c: [0.184, 0.353, 0.573], rough: 0.80, sss: 0.10 }, // shorts
+  { c: [0.796, 0.757, 0.663], rough: 0.84, sss: 0.10 }, // shorts cuff
+  { c: [0.522, 0.420, 0.310], rough: 0.68, sss: 0.05 }, // sandal
+  { c: [0.318, 0.278, 0.235], rough: 0.86, sss: 0.00 }, // sole
+  { c: [0.851, 0.714, 0.427], rough: 0.78, sss: 0.30 }, // straw
+  { c: [0.686, 0.196, 0.161], rough: 0.72, sss: 0.10 }, // hat band
+  { c: [0.949, 0.937, 0.914], rough: 0.16, sss: 0.20 }, // sclera
+  { c: [0.078, 0.066, 0.062], rough: 0.10, sss: 0.00 }, // iris
+  { c: [0.255, 0.088, 0.086], rough: 0.42, sss: 0.60 }, // mouth
+  { c: [0.918, 0.902, 0.871], rough: 0.22, sss: 0.30 }, // teeth
+  { c: [0.741, 0.427, 0.365], rough: 0.55, sss: 0.90 }, // scar
+  { c: [1.000, 1.000, 1.000], rough: 0.05, sss: 0.00 }  // eye glint
+];
+
+/* ==========================================================================
+   3 · Monkey D. Luffy
+   Canonical standing study pose. +y up, +z forward (he faces the camera),
+   origin between the soles. 1.72 m to the crown, a shade over seven heads.
+   His left is +x, so the scar sits on the viewer's right — as it should.
+   ========================================================================== */
+
+const MODEL = { hat: true, height: 1.74 };
+const BOUNDS = { x0: -0.33, y0: -0.02, z0: -0.29, x1: 0.33, y1: 1.87, z1: 0.29 };
+
+/* Everything above the collar is built at a canonical size and then scaled
+   about the base of the neck: a shade under seven heads to the crown, which
+   is how the character is drawn. */
+const HS = 1.062, HP = 1.4650, HTY = 0.070, HTZ = -0.042;
+const HCY = Math.cos(HTY), HSY = Math.sin(HTY);
+const HCZ = Math.cos(HTZ), HSZ = Math.sin(HTZ);
+const _hd = [0, 0, 0];
+function toHead(x, y, z) {
+  const py = y - HP;
+  const ux = x * HCY - z * HSY, uz = x * HSY + z * HCY;
+  _hd[0] = (ux * HCZ + py * HSZ) / HS;
+  _hd[1] = (-ux * HSZ + py * HCZ) / HS + HP;
+  _hd[2] = uz / HS;
+  return _hd;
+}
+
+/* ---- torso ------------------------------------------------------------- */
+/* g inflates the whole stack; the vest is a shell built from two inflations */
+function torsoCore(x, y, z, g) {
+  let d =        sdEllipsoid(x, y, z, 0, 0.905, 0.004, 0.128 + g, 0.106 + g, 0.096 + g);
+  d = smin(d,    sdEllipsoid(x, y, z, 0, 1.035, 0.006, 0.114 + g, 0.096 + g, 0.089 + g), 0.075);
+  d = smin(d,    sdEllipsoid(x, y, z, 0, 1.180, 0.008, 0.149 + g, 0.116 + g, 0.104 + g), 0.085);
+  d = smin(d,    sdEllipsoid(x, y, z, 0, 1.268, 0.028, 0.147 + g, 0.078 + g, 0.099 + g), 0.070);
+  d = smin(d,    sdEllipsoid(x, y, z, 0, 1.378, 0.000, 0.182 + g, 0.072 + g, 0.098 + g), 0.065);
+  d = smin(d,    sdEllipsoid(x, y, z, 0, 1.402, -0.012, 0.112 + g, 0.052 + g, 0.076 + g), 0.070);
+  return d;
+}
+
+function sdTorso(x, y, z) {
+  let d = torsoCore(x, y, z, 0);
+  const ax = Math.abs(x);
+  /* sternum groove and two abdominal creases — they only ever show through
+     the open front of the vest, which is exactly where they belong */
+  d = smax(d, -sdCone(ax, y, z, 0, 1.300, 0.104, 0, 1.212, 0.100, 0.007, 0.005), 0.045);
+  d = smax(d, -sdCone(ax, y, z, 0, 1.130, 0.098, 0.050, 1.126, 0.078, 0.0055, 0.004), 0.050);
+  d = smax(d, -sdCone(ax, y, z, 0, 1.060, 0.092, 0.046, 1.056, 0.074, 0.005, 0.0035), 0.050);
+  /* collarbones */
+  d = smax(d, -sdCone(ax, y, z, 0.012, 1.336, 0.086, 0.126, 1.352, 0.048, 0.008, 0.006), 0.045);
+  return d;
+}
+
+/* ---- arms and legs ----------------------------------------------------- */
+/* mirrored through |x|, so one description builds both sides */
+function sdLimbs(x, y, z) {
+  const ax = Math.abs(x);
+
+  /* leg: thigh, knee, shin, calf, foot */
+  let d =     sdCone(ax, y, z, 0.083, 0.885, 0.004, 0.094, 0.478, 0.014, 0.083, 0.055);
+  d = smin(d, sdCone(ax, y, z, 0.094, 0.470, 0.012, 0.090, 0.104, -0.006, 0.056, 0.036), 0.055);
+  d = smin(d, sdEllipsoid(ax, y, z, 0.094, 0.474, 0.022, 0.053, 0.048, 0.052), 0.045);
+  d = smin(d, sdEllipsoid(ax, y, z, 0.093, 0.368, -0.026, 0.050, 0.076, 0.046), 0.070);
+  d = smin(d, sdCone(ax, y, z, 0.090, 0.076, -0.024, 0.091, 0.048, 0.086, 0.046, 0.036), 0.045);
+  d = smin(d, sdSphere(ax, y, z, 0.090, 0.066, -0.032, 0.042), 0.035);
+  d = Math.max(d, 0.023 - y);              /* flat sole, the sandal goes under */
+
+  /* arm: deltoid, upper arm, elbow, forearm */
+  let a =     sdEllipsoid(ax, y, z, 0.174, 1.376, 0.002, 0.055, 0.062, 0.055);
+  a = smin(a, sdCone(ax, y, z, 0.178, 1.388, 0.000, 0.209, 1.128, 0.014, 0.050, 0.040), 0.045);
+  a = smin(a, sdSphere(ax, y, z, 0.209, 1.124, 0.014, 0.043), 0.035);
+  a = smin(a, sdCone(ax, y, z, 0.209, 1.128, 0.016, 0.231, 0.872, 0.026, 0.046, 0.030), 0.045);
+  a = smin(a, sdEllipsoid(ax, y, z, 0.215, 1.048, 0.018, 0.043, 0.056, 0.042), 0.060);
+
+  /* a loose hand: palm, four curled fingers with real creases between
+     them, and a thumb tucked in against the thigh */
+  let h = sdRoundBox(ax, y, z, 0.2355, 0.8285, 0.0245, 0.0190, 0.0295, 0.0150, 0.0132);
+  let f =         sdCone(ax, y, z, 0.2175, 0.7960, 0.0215, 0.2175, 0.8085, 0.0540, 0.0100, 0.0086);
+  f = smin(f, sdCone(ax, y, z, 0.2305, 0.7930, 0.0225, 0.2305, 0.8075, 0.0575, 0.0104, 0.0090), 0.0045);
+  f = smin(f, sdCone(ax, y, z, 0.2430, 0.7945, 0.0225, 0.2430, 0.8080, 0.0565, 0.0101, 0.0087), 0.0045);
+  f = smin(f, sdCone(ax, y, z, 0.2545, 0.8010, 0.0220, 0.2545, 0.8125, 0.0510, 0.0094, 0.0080), 0.0045);
+  h = smin(h, f, 0.013);
+  h = smin(h, sdCone(ax, y, z, 0.2170, 0.8385, 0.0300, 0.2140, 0.8020, 0.0555, 0.0118, 0.0094), 0.016);
+  a = smin(a, h, 0.028);
+
+  return smin(d, a, 0.030);
+}
+
+/* ---- head -------------------------------------------------------------- */
+/* the bare skull mass; the hair shells it, so it is factored out */
+function headCore(x, y, z, g) {
+  const ax = Math.abs(x);
+  let d =     sdEllipsoid(x, y, z, 0, 1.606, -0.006, 0.0985 + g, 0.1140 + g, 0.1035 + g);
+  d = smin(d, sdEllipsoid(x, y, z, 0, 1.554, 0.014, 0.0762 + g, 0.0665 + g, 0.0875 + g), 0.055);
+  d = smin(d, sdEllipsoid(x, y, z, 0, 1.5095, 0.050, 0.0378 + g, 0.0310 + g, 0.0440 + g), 0.046);
+  d = smin(d, sdSphere(ax, y, z, 0.0605, 1.5745, 0.040, 0.0272 + g), 0.055);
+  d = smin(d, sdEllipsoid(x, y, z, 0, 1.612, 0.070, 0.0745 + g, 0.0180 + g, 0.0300 + g), 0.032);
+  d = smin(d, sdCone(x, y, z, 0, 1.436, -0.014, 0, 1.526, -0.006, 0.051 + g, 0.055 + g), 0.048);
+  return d;
+}
+
+const MOUTH_Y = 1.5100;
+const MOUTH_CURVE = 5.0;
+
+/* a 2-D capsule in the xy plane; intersected with a thin shell around the
+   skull it paints a mark that follows the face instead of floating off it */
+function cap2(px, py, ax, ay, bx, by, r, r2) {
+  const bax = bx - ax, bay = by - ay, pax = px - ax, pay = py - ay;
+  const h = clamp((pax * bax + pay * bay) / (bax * bax + bay * bay), 0, 1);
+  return len2(pax - bax * h, pay - bay * h) - (r2 === undefined ? r : r + (r2 - r) * h);
+}
+
+function sdHeadL(x, y, z) {
+  const ax = Math.abs(x);
+  let d = headCore(x, y, z, 0);
+
+  /* nose: a short bridge and a small button, with a hint of nostril */
+  d = smin(d, sdCone(x, y, z, 0, 1.6010, 0.0860, 0, 1.5820, 0.0995, 0.0082, 0.0124), 0.013);
+  d = smin(d, sdSphere(x, y, z, 0, 1.5810, 0.1030, 0.0134), 0.012);
+  d = smax(d, -sdSphere(ax, y, z, 0.0112, 1.5715, 0.0980, 0.0050), 0.009);
+
+  /* ears */
+  let ear = sdEllipsoid(ax, y, z, 0.1010, 1.5860, -0.016, 0.0125, 0.0300, 0.0210);
+  ear = smax(ear, -sdEllipsoid(ax, y, z, 0.1140, 1.5840, -0.012, 0.0100, 0.0200, 0.0132), 0.008);
+  d = smin(d, ear, 0.016);
+
+  /* eyes. A shallow dish with a lens seated in it — the outline of the eye
+     is painted in the shader rather than cut into the mesh, which keeps it
+     crisp at any density and avoids a knife edge the mesher cannot resolve. */
+  d = smax(d, -sdEllipsoid(ax, y, z, 0.0520, 1.5885, 0.1110, 0.0445, 0.0375, 0.0300), 0.030);
+  d = smin(d, sdEllipsoid(ax, y, z, 0.0520, 1.5885, 0.0555, 0.0375, 0.0310, 0.0345), 0.014);
+
+  /* the grin: a shallow depression in bent space, again painted rather than
+     carved through */
+  const mby = y - (MOUTH_Y + MOUTH_CURVE * x * x);
+  d = smax(d, -sdEllipsoid(x, mby, z, 0, 0, 0.1130, 0.0730, 0.0245, 0.0235), 0.020);
+  d = smin(d, sdCone(x, y, z, -0.026, 1.4830, 0.0760, 0.026, 1.4830, 0.0760, 0.0076, 0.0076), 0.034);
+
+  return d;
+}
+
+/* ---- hair -------------------------------------------------------------- */
+/* a thin shell over the skull, cut along a hairline that rides high at the
+   back and drops into a five-point fringe over the brow */
+function hairLine(x, z) {
+  const dx = x, dz = z + 0.006;
+  const r = Math.max(len2(dx, dz), 1e-5);
+  const c = dz / r;                                  /* 1 = front, -1 = nape */
+  const f = Math.max(c, 0), b = Math.max(-c, 0);
+  let yh = 1.6140 + 0.0500 * f * f * (2 - f) - 0.0680 * b;
+  const ang = Math.atan2(dx, dz);
+  yh -= 0.0250 * f * Math.pow(0.5 + 0.5 * Math.cos(11 * ang), 0.75);   /* fringe points */
+  return yh;
+}
+
+function sdHairL(x, y, z) {
+  const b = len3(x, y - 1.615, z + 0.006) - 0.200;
+  if (b > 0.05) return b;
+  const ax = Math.abs(x);
+
+  const outer = headCore(x, y, z, 0.0205);
+  const inner = headCore(x, y, z, 0.0025);
+  let d = smax(outer, -inner, 0.006);
+  d = smax(d, (hairLine(x, z) - y) * 0.42, 0.007);
+
+  /* sideburn points in front of the ears */
+  let s = sdCone(ax, y, z, 0.0925, 1.6180, 0.0330, 0.0880, 1.5810, 0.0450, 0.0135, 0.0030);
+  /* a cowlick and two loose tufts, so the silhouette is not a helmet */
+  s = Math.min(s, sdCone(x, y, z, 0.010, 1.6960, -0.030, -0.028, 1.7300, -0.090, 0.0185, 0.0068));
+  s = Math.min(s, sdCone(x, y, z, -0.062, 1.6360, -0.086, -0.098, 1.6285, -0.138, 0.0150, 0.0062));
+  s = Math.min(s, sdCone(x, y, z, 0.068, 1.6280, -0.090, 0.106, 1.6180, -0.142, 0.0145, 0.0060));
+  s = Math.min(s, sdCone(x, y, z, 0.000, 1.5600, -0.094, 0.000, 1.5230, -0.080, 0.0265, 0.0105));
+
+  return smin(d, s, 0.012);
+}
+
+/* ---- vest -------------------------------------------------------------- */
+function sdVest(x, y, z) {
+  const b = len3(x, y - 1.22, z - 0.005) - 0.30;
+  if (b > 0.05) return b;
+  const ax = Math.abs(x);
+
+  let d = Math.max(torsoCore(x, y, z, 0.0225), -torsoCore(x, y, z, 0.0065));
+  d = Math.max(d, 1.0180 - y);                        /* hem, just above the waist */
+  d = Math.max(d, y - 1.4460);                        /* shoulder line */
+  d = Math.max(d, -sdSphere(x, y, z, 0, 1.478, 0.004, 0.088));   /* neck hole */
+  d = Math.max(d, -sdSphere(ax, y, z, 0.180, 1.374, 0.004, 0.092)); /* armholes */
+
+  /* the front hangs open in a widening V */
+  const w = 0.030 + 0.150 * Math.max(y - 1.030, 0);
+  const opening = Math.max(ax - w, -(z + 0.030));
+  d = Math.max(d, -opening);
+
+  return d;
+}
+
+/* ---- shorts ------------------------------------------------------------ */
+function shortsCore(x, y, z, g) {
+  const ax = Math.abs(x);
+  let d =     sdEllipsoid(x, y, z, 0, 0.898, 0.004, 0.125 + g, 0.108 + g, 0.097 + g);
+  d = smin(d, sdCone(ax, y, z, 0.083, 0.885, 0.004, 0.095, 0.545, 0.012, 0.079 + g, 0.070 + g), 0.060);
+  return d;
+}
+
+function sdShorts(x, y, z) {
+  const b = len3(x, y - 0.80, z - 0.005) - 0.29;
+  if (b > 0.05) return b;
+  let d = Math.max(shortsCore(x, y, z, 0.0175), -shortsCore(x, y, z, 0.0035));
+  d = Math.max(d, 0.6000 - y);
+  d = Math.max(d, y - 0.9810);
+  return d;
+}
+
+function sdCuff(x, y, z) {
+  const b = len3(x, y - 0.610, z - 0.010) - 0.20;
+  if (b > 0.05) return b;
+  const ax = Math.abs(x);
+  return sdTorusY(ax, y, z, 0.0930, 0.6045, 0.0110, 0.0842, 0.0106);
+}
+
+/* ---- sandals ----------------------------------------------------------- */
+function sdSole(x, y, z) {
+  const b = len3(x, y - 0.012, z - 0.030) - 0.20;
+  if (b > 0.05) return b;
+  const ax = Math.abs(x);
+  let d = sdRoundBox(ax, y, z, 0.0905, 0.0120, 0.0300, 0.0415, 0.0082, 0.0895, 0.0092);
+  return d;
+}
+
+function sdStrap(x, y, z) {
+  const b = len3(x, y - 0.058, z - 0.030) - 0.170;
+  if (b > 0.05) return b;
+  const ax = Math.abs(x);
+  /* the band rides across the instep as a ring around the foot; whatever
+     dips below the footbed is hidden inside the sole */
+  let d = len2(len2(ax - 0.0904, y - 0.0642) - 0.0455, z - 0.0240) - 0.0102;
+  /* and a thong from the band down between the toes */
+  d = smin(d, sdCone(ax, y, z, 0.0904, 0.1080, 0.0250, 0.0848, 0.0380, 0.0870, 0.0098, 0.0076), 0.012);
+  return d;
+}
+
+/* ---- the straw hat ----------------------------------------------------- */
+/* built in its own frame: origin at the crown, tipped back off the brow */
+const HAT = { x: 0, y: 1.7570, z: -0.0330, tilt: 0.190 };
+const HAT_C = Math.cos(HAT.tilt), HAT_S = Math.sin(HAT.tilt);
+
+function hatLocal(x, y, z, out) {
+  const px = x - HAT.x, py = y - HAT.y, pz = z - HAT.z;
+  out[0] = px;
+  out[1] = py * HAT_C - pz * HAT_S;
+  out[2] = py * HAT_S + pz * HAT_C;
+}
+const _hl = [0, 0, 0];
+
+const HAT_R = 0.1880;          /* brim radius */
+const HAT_Y0 = -0.0755;        /* where crown meets brim, in hat space */
+
+function sdHatStrawL(x, y, z) {
+  const b = len3(x - HAT.x, y - (HAT.y - 0.06), z - HAT.z) - 0.245;
+  if (b > 0.05) return b;
+  hatLocal(x, y, z, _hl);
+  const hx = _hl[0], hy = _hl[1], hz = _hl[2];
+  const rr = len2(hx, hz);
+
+  /* brim: a disc whose mid-surface droops toward the rim, with a faint
+     radial ripple standing in for the weave */
+  const t = rr / HAT_R;
+  const y0 = HAT_Y0 - 0.0340 * t * t;
+  const th = 0.0026 + 0.0006 * Math.cos(rr * 150);
+  const dy = Math.abs(hy - y0) - th;
+  const dx = rr - (HAT_R - 0.0055);
+  const brim = Math.min(Math.max(dx, dy), 0)
+             + len2(Math.max(dx, 0), Math.max(dy, 0)) - 0.0055;
+
+  /* crown: sleeves down over the skull, softly domed on top */
+  let crown = sdCone(hx, hy, hz, 0, HAT_Y0 - 0.004, 0, 0, -0.0085, 0, 0.1090, 0.0985);
+  crown = Math.max(crown, hy + 0.0085) - 0.0085;
+
+  return smin(brim, crown, 0.016);
+}
+
+function sdHatBandL(x, y, z) {
+  const b = len3(x - HAT.x, y - (HAT.y - 0.06), z - HAT.z) - 0.190;
+  if (b > 0.05) return b;
+  hatLocal(x, y, z, _hl);
+  return sdTorusY(_hl[0], _hl[1], _hl[2], 0, -0.0530, 0, 0.1150, 0.0130);
+}
+
+/* ==========================================================================
+   4 · The field the mesher walks
+   ========================================================================== */
+
+function sdHead(x, y, z)     { const p = toHead(x, y, z); return sdHeadL(p[0], p[1], p[2]) * HS; }
+function sdHair(x, y, z)     { const p = toHead(x, y, z); return sdHairL(p[0], p[1], p[2]) * HS; }
+function sdHatStraw(x, y, z) { const p = toHead(x, y, z); return sdHatStrawL(p[0], p[1], p[2]) * HS; }
+function sdHatBand(x, y, z)  { const p = toHead(x, y, z); return sdHatBandL(p[0], p[1], p[2]) * HS; }
+
+function sdSkin(x, y, z) {
+  /* head and body are far enough apart to be worth two bounding tests */
+  const hb = len3(x, y - 1.606, z - 0.010) - 0.195;
+  const bb = len3(x, y - 0.760, z - 0.005) - 0.720;
+  let d = 1e9;
+  if (bb < 0.06) {
+    d = Math.min(sdTorso(x, y, z), sdLimbs(x, y, z));
+  } else d = bb;
+  if (hb < 0.06) d = smin(d, sdHead(x, y, z), 0.030);
+  else d = Math.min(d, hb);
+  return d;
+}
+
+/* Groups join with a hairline fillet rather than a hard union. A knife-edge
+   crease where the hair meets the scalp — or the vest meets skin — is a
+   feature no grid can resolve, and the mesher zigzags along it; 4 mm of
+   round-over is invisible on the model and lets it land cleanly. */
+const JOIN = 0.0042;
+function sdf(x, y, z) {
+  let d = sdSkin(x, y, z);
+  d = smin(d, sdHair(x, y, z), JOIN);
+  d = smin(d, sdVest(x, y, z), JOIN);
+  d = smin(d, sdShorts(x, y, z), JOIN);
+  d = smin(d, sdCuff(x, y, z), JOIN);
+  d = smin(d, sdSole(x, y, z), JOIN);
+  d = smin(d, sdStrap(x, y, z), JOIN);
+  if (MODEL.hat) {
+    d = smin(d, sdHatStraw(x, y, z), JOIN);
+    d = smin(d, sdHatBand(x, y, z), JOIN);
+  }
+  return d;
+}
+
+/* which material owns this point. Only the group is decided here: the marks
+   on the face — eyes, brows, lips, teeth, scar — are painted per fragment in
+   the shader instead, so they stay sharp however coarse the mesh is. */
+function materialAt(x, y, z) {
+  let best = sdSkin(x, y, z), mat = M.SKIN;
+  const test = (d, m) => { if (d < best) { best = d; mat = m; } };
+  test(sdHair(x, y, z), M.HAIR);
+  test(sdVest(x, y, z), M.VEST);
+  test(sdShorts(x, y, z), M.SHORTS);
+  test(sdCuff(x, y, z), M.CUFF);
+  test(sdSole(x, y, z), M.SOLE);
+  test(sdStrap(x, y, z), M.SANDAL);
+  if (MODEL.hat) {
+    test(sdHatStraw(x, y, z), M.STRAW);
+    test(sdHatBand(x, y, z), M.BAND);
+  }
+  return mat;
+}
+
+/* the same face marks, in JavaScript, for anything that needs colour without
+   a GPU (the OBJ export writes them into vertex colours) */
+function faceMaterial(wx, wy, wz, base) {
+  if (base !== M.SKIN) return base;
+  const p = toHead(wx, wy, wz), x = p[0], y = p[1], z = p[2];
+  const ax = Math.abs(x);
+  const qx = (ax - 0.0520) / 0.0330, qy = (y - 1.5885) / 0.0272;
+  const ql = len2(qx, qy);
+  if (ql < 1 && z > 0.030) {
+    if (ql > 0.925) return M.HAIR;                             /* eye liner */
+    if (qy > 0.62) return M.HAIR;                              /* upper lash */
+    const ex = (ax - 0.0520) / 0.0375, ey = (y - 1.5885) / 0.0310, ez = (z - 0.0555) / 0.0345;
+    const inv = 1 / Math.max(len3(ex, ey, ez), 1e-6);
+    const ux = ex * inv, uy = ey * inv, uz = ez * inv;
+    if (ux * -0.255 + uy * 0.300 + uz * 0.919 > 0.9890) return M.GLINT;
+    if (ux * 0.090 - uy * 0.115 + uz * 0.989 > 0.7350) return M.IRIS;
+    return M.SCLERA;
+  }
+  if (Math.max(cap2(ax, y, 0.0185, 1.6100, 0.0800, 1.6180, 0.0084, 0.0044), 0.020 - z) < 0) return M.HAIR;
+  const mby = y - (MOUTH_Y + MOUTH_CURVE * x * x);
+  if (sdEllipsoid(x, mby, z, 0, 0.0045, 0.0800, 0.0665, 0.0190, 0.0420) < 0) return M.TEETH;
+  if (sdEllipsoid(x, mby, z, 0, 0, 0.0800, 0.0745, 0.0282, 0.0430) < 0) return M.MOUTH;
+  if (Math.max(cap2(x, y, 0.0625, 1.5490, 0.0625, 1.5625, 0.0021), 0.020 - z) < 0) return M.SCAR;
+  return M.SKIN;
+}
+
+/* ==========================================================================
+   5 · Polygoniser — block-sparse surface nets
+   Marching cubes would give a crease-free but faceted surface and a 256-case
+   table. Surface nets place one vertex per cell at the average of its edge
+   crossings, which suits an organic body far better; the field is sampled a
+   block at a time and blocks that cannot possibly contain the surface are
+   rejected on a single distance query.
+   ========================================================================== */
+
+const B = 6;                                  /* cells per block edge */
+const BS = (B + 1) * (B + 1) * (B + 1);
+const FAR = 1e6;
+const AO_R = [0.008, 0.020, 0.038, 0.062, 0.095];
+
+/* the twelve cube edges, as pairs of corner indices (bit0=x bit1=y bit2=z) */
+const EDGE = [
+  0, 1, 2, 3, 4, 5, 6, 7,          /* along x */
+  0, 2, 1, 3, 4, 6, 5, 7,          /* along y */
+  0, 4, 1, 5, 2, 6, 3, 7           /* along z */
+];
+
+function createBuild(h) {
+  const x0 = BOUNDS.x0, y0 = BOUNDS.y0, z0 = BOUNDS.z0;
+  const nx = Math.ceil((BOUNDS.x1 - x0) / h);
+  const ny = Math.ceil((BOUNDS.y1 - y0) / h);
+  const nz = Math.ceil((BOUNDS.z1 - z0) / h);
+  const bx = Math.ceil(nx / B), by = Math.ceil(ny / B), bz = Math.ceil(nz / B);
+  const nBlocks = bx * by * bz;
+  const halfDiag = B * h * 0.8661 + h;        /* block centre to corner */
+
+  const corner = new Float32Array(BS);
+  const D = new Float64Array(8);
+  const eg = h * 0.34;
+  const CX = new Float64Array(12 * 6);
+  let nCross = 0;
+  const cell = new Map();                     /* packed cell key -> vertex id */
+  const px = [], py = [], pz = [];            /* vertex positions */
+  const keys = [], flags = [];                /* per cell, for the quad pass */
+
+  let block = 0, samples = 0, skipped = 0, shaded = 0, out = null, edges = null, relaxed = 0;
+  const t0 = (typeof performance !== "undefined" ? performance.now() : Date.now());
+  let tBuild = 0;
+
+  const S1 = (B + 1), S2 = (B + 1) * (B + 1);
+  const key = (i, j, k) => i + j * nx + k * nx * ny;
+
+  function fillBlock(i0, j0, k0) {
+    for (let k = 0; k <= B; k++) {
+      const wz = z0 + (k0 + k) * h;
+      for (let j = 0; j <= B; j++) {
+        const wy = y0 + (j0 + j) * h;
+        let o = j * S1 + k * S2;
+        for (let i = 0; i <= B; i++, o++) corner[o] = sdf(x0 + (i0 + i) * h, wy, wz);
+      }
+    }
+    samples += BS;
+  }
+
+  function meshBlock(i0, j0, k0) {
+    const c = corner;
+    for (let k = 0; k < B; k++) {
+      if (k0 + k >= nz) break;
+      for (let j = 0; j < B; j++) {
+        if (j0 + j >= ny) break;
+        for (let i = 0; i < B; i++) {
+          if (i0 + i >= nx) break;
+          const o = i + j * S1 + k * S2;
+          /* gather the eight corners */
+          const d0 = c[o],           d1 = c[o + 1];
+          const d2 = c[o + S1],      d3 = c[o + S1 + 1];
+          const d4 = c[o + S2],      d5 = c[o + S2 + 1];
+          const d6 = c[o + S1 + S2], d7 = c[o + S1 + S2 + 1];
+          let mask = 0;
+          if (d0 < 0) mask |= 1;   if (d1 < 0) mask |= 2;
+          if (d2 < 0) mask |= 4;   if (d3 < 0) mask |= 8;
+          if (d4 < 0) mask |= 16;  if (d5 < 0) mask |= 32;
+          if (d6 < 0) mask |= 64;  if (d7 < 0) mask |= 128;
+          if (mask === 0 || mask === 255) continue;
+
+          D[0]=d0; D[1]=d1; D[2]=d2; D[3]=d3; D[4]=d4; D[5]=d5; D[6]=d6; D[7]=d7;
+          /* Dual contouring: every edge crossing carries the normal of the
+             trilinear field, which the eight corners already give for free.
+             Solving for the point that best fits those tangent planes keeps
+             the hair line, the hat brim and the hem of the vest crisp where
+             plain surface nets would zigzag along them by half a cell. */
+          let mx = 0, my = 0, mz = 0, n = 0;
+          let a00 = 0, a01 = 0, a02 = 0, a11 = 0, a12 = 0, a22 = 0, b0 = 0, b1 = 0, b2 = 0;
+          nCross = 0;
+          for (let e = 0; e < 12; e++) {
+            const a = EDGE[e * 2], b = EDGE[e * 2 + 1];
+            const da = D[a], db = D[b];
+            if ((da < 0) === (db < 0)) continue;
+            const t = da / (da - db);
+            const axa = a & 1, aya = (a >> 1) & 1, aza = (a >> 2) & 1;
+            const ux = axa + ((b & 1) - axa) * t;
+            const uy = aya + (((b >> 1) & 1) - aya) * t;
+            const uz = aza + (((b >> 2) & 1) - aza) * t;
+            const x1 = 1 - ux, y1 = 1 - uy, z1 = 1 - uz;
+            let nx = y1 * z1 * (d1 - d0) + uy * z1 * (d3 - d2) + y1 * uz * (d5 - d4) + uy * uz * (d7 - d6);
+            let ny = x1 * z1 * (d2 - d0) + ux * z1 * (d3 - d1) + x1 * uz * (d6 - d4) + ux * uz * (d7 - d5);
+            let nz = x1 * y1 * (d4 - d0) + ux * y1 * (d5 - d1) + x1 * uy * (d6 - d2) + ux * uy * (d7 - d3);
+            const nl = Math.sqrt(nx * nx + ny * ny + nz * nz);
+            if (nl < 1e-12) continue;
+            const o6 = nCross * 6;
+            CX[o6] = ux; CX[o6 + 1] = uy; CX[o6 + 2] = uz;
+            CX[o6 + 3] = nx / nl; CX[o6 + 4] = ny / nl; CX[o6 + 5] = nz / nl;
+            nCross++;
+            mx += ux; my += uy; mz += uz; n++;
+          }
+          if (n === 0) continue;
+          mx /= n; my /= n; mz /= n;
+
+          /* Do the eight corners agree on where the surface is heading? If
+             they scatter, a crease runs through this cell and the trilinear
+             normals are lying about it — resample the real field there. The
+             hair line, the hat brim and the hem of the vest all land here;
+             the other 90% of cells are smooth and cost nothing extra. */
+          let ax_ = 0, ay_ = 0, az_ = 0;
+          for (let c = 0; c < nCross; c++) { ax_ += CX[c * 6 + 3]; ay_ += CX[c * 6 + 4]; az_ += CX[c * 6 + 5]; }
+          const al = Math.sqrt(ax_ * ax_ + ay_ * ay_ + az_ * az_) / nCross;
+          if (al < 0.945) {
+            for (let c = 0; c < nCross; c++) {
+              const o6 = c * 6;
+              const wx = x0 + (i0 + i + CX[o6]) * h;
+              const wy = y0 + (j0 + j + CX[o6 + 1]) * h;
+              const wz = z0 + (k0 + k + CX[o6 + 2]) * h;
+              const g1 = sdf(wx + eg, wy - eg, wz - eg), g2 = sdf(wx - eg, wy - eg, wz + eg);
+              const g3 = sdf(wx - eg, wy + eg, wz - eg), g4 = sdf(wx + eg, wy + eg, wz + eg);
+              let nx = g1 - g2 - g3 + g4, ny = -g1 - g2 + g3 + g4, nz = -g1 + g2 - g3 + g4;
+              const nl = Math.sqrt(nx * nx + ny * ny + nz * nz);
+              if (nl < 1e-12) continue;
+              nx /= nl; ny /= nl; nz /= nl;
+              const stp = clamp((g1 + g2 + g3 + g4) * 0.25, -h * 0.5, h * 0.5) / h;
+              CX[o6] -= nx * stp; CX[o6 + 1] -= ny * stp; CX[o6 + 2] -= nz * stp;
+              CX[o6 + 3] = nx; CX[o6 + 4] = ny; CX[o6 + 5] = nz;
+            }
+            samples += nCross * 4;
+            mx = 0; my = 0; mz = 0;
+            for (let c = 0; c < nCross; c++) { mx += CX[c * 6]; my += CX[c * 6 + 1]; mz += CX[c * 6 + 2]; }
+            mx /= nCross; my /= nCross; mz /= nCross;
+          }
+
+          for (let c = 0; c < nCross; c++) {
+            const o6 = c * 6;
+            const ux = CX[o6], uy = CX[o6 + 1], uz = CX[o6 + 2];
+            const nx = CX[o6 + 3], ny = CX[o6 + 4], nz = CX[o6 + 5];
+            const w = nx * ux + ny * uy + nz * uz;
+            a00 += nx * nx; a01 += nx * ny; a02 += nx * nz;
+            a11 += ny * ny; a12 += ny * nz; a22 += nz * nz;
+            b0 += nx * w; b1 += ny * w; b2 += nz * w;
+          }
+
+
+          /* pull the solve toward the mass point so flat cells stay stable */
+          const lam = 0.09;
+          a00 += lam; a11 += lam; a22 += lam;
+          b0 += lam * mx; b1 += lam * my; b2 += lam * mz;
+          const c00 = a11 * a22 - a12 * a12, c01 = a02 * a12 - a01 * a22, c02 = a01 * a12 - a02 * a11;
+          const det = a00 * c00 + a01 * c01 + a02 * c02;
+          let sx = mx, sy = my, sz = mz;
+          if (Math.abs(det) > 1e-10) {
+            const c11 = a00 * a22 - a02 * a02, c12 = a02 * a01 - a00 * a12, c22 = a00 * a11 - a01 * a01;
+            sx = (c00 * b0 + c01 * b1 + c02 * b2) / det;
+            sy = (c01 * b0 + c11 * b1 + c12 * b2) / det;
+            sz = (c02 * b0 + c12 * b1 + c22 * b2) / det;
+            if (!(sx > -0.35 && sx < 1.35 && sy > -0.35 && sy < 1.35 && sz > -0.35 && sz < 1.35)) {
+              sx = mx; sy = my; sz = mz;
+            }
+          }
+          const gi = i0 + i, gj = j0 + j, gk = k0 + k;
+          cell.set(key(gi, gj, gk), px.length);
+          px.push(x0 + (gi + sx) * h);
+          py.push(y0 + (gj + sy) * h);
+          pz.push(z0 + (gk + sz) * h);
+          keys.push(gi, gj, gk);
+          /* bit0 inside at the low corner, bits 1-3 crossings on the three
+             edges that leave it — everything the quad pass needs */
+          let f = (mask & 1);
+          if (((d0 < 0) !== (d1 < 0))) f |= 2;
+          if (((d0 < 0) !== (d2 < 0))) f |= 4;
+          if (((d0 < 0) !== (d4 < 0))) f |= 8;
+          flags.push(f);
+        }
+      }
+    }
+  }
+
+  return {
+    total: nBlocks,
+    get done() { return block >= nBlocks; },
+    get progress() { return block / nBlocks; },
+
+    /* work until the deadline, then hand control back so the page can paint */
+    step(budgetMs) {
+      const now = () => (typeof performance !== "undefined" ? performance.now() : Date.now());
+      const until = now() + budgetMs;
+      while (block < nBlocks) {
+        const b = block++;
+        const ib = b % bx, jb = ((b / bx) | 0) % by, kb = (b / (bx * by)) | 0;
+        const i0 = ib * B, j0 = jb * B, k0 = kb * B;
+        const cx = x0 + (i0 + B * 0.5) * h;
+        const cy = y0 + (j0 + B * 0.5) * h;
+        const cz = z0 + (k0 + B * 0.5) * h;
+        samples++;
+        const d = sdf(cx, cy, cz);
+        if (d > halfDiag || d < -halfDiag) { skipped++; }
+        else { fillBlock(i0, j0, k0); meshBlock(i0, j0, k0); }
+        if (now() > until) break;
+      }
+      if (block >= nBlocks) tBuild = now() - t0;
+      return block >= nBlocks;
+    },
+
+    /* stitch the vertices into quads */
+    stitch() {
+      const nv = px.length;
+      const tri = [], line = [], seen = new Set();
+      const edgeKey = (a, b) => (a < b ? a * 4294967296 + b : b * 4294967296 + a);
+      const quad = (a, b, c, d) => {
+        tri.push(a, b, c, a, c, d);
+        for (const [u, v] of [[a, b], [b, c], [c, d], [d, a]]) {
+          const k = edgeKey(u, v);
+          if (!seen.has(k)) { seen.add(k); line.push(u, v); }
+        }
+      };
+      const ok = (a, b, c, d) => a !== undefined && b !== undefined && c !== undefined && d !== undefined;
+
+      for (let v = 0; v < nv; v++) {
+        const i = keys[v * 3], j = keys[v * 3 + 1], k = keys[v * 3 + 2];
+        const f = flags[v];
+        if ((f & 2) && j > 0 && k > 0) {                       /* edge along x */
+          const a = cell.get(key(i, j - 1, k - 1)), b = cell.get(key(i, j, k - 1)),
+                c = cell.get(key(i, j, k)), d = cell.get(key(i, j - 1, k));
+          if (ok(a, b, c, d)) (f & 1) ? quad(a, b, c, d) : quad(d, c, b, a);
+        }
+        if ((f & 4) && i > 0 && k > 0) {                       /* edge along y */
+          const a = cell.get(key(i - 1, j, k - 1)), b = cell.get(key(i, j, k - 1)),
+                c = cell.get(key(i, j, k)), d = cell.get(key(i - 1, j, k));
+          if (ok(a, b, c, d)) (f & 1) ? quad(d, c, b, a) : quad(a, b, c, d);
+        }
+        if ((f & 8) && i > 0 && j > 0) {                       /* edge along z */
+          const a = cell.get(key(i - 1, j - 1, k)), b = cell.get(key(i, j - 1, k)),
+                c = cell.get(key(i, j, k)), d = cell.get(key(i - 1, j, k));
+          if (ok(a, b, c, d)) (f & 1) ? quad(a, b, c, d) : quad(d, c, b, a);
+        }
+      }
+      edges = line;
+      out = {
+        vertexData: new ArrayBuffer(nv * 32), stride: 32, count: nv,
+        index: nv > 65535 ? new Uint32Array(tri) : new Uint16Array(tri), tris: tri.length / 3,
+        lineIndex: nv > 65535 ? new Uint32Array(line) : new Uint16Array(line), lines: line.length / 2,
+        voxel: h, dims: [nx, ny, nz], blocks: nBlocks, skipped, samples, ms: 0,
+        ymin: Infinity, ymax: -Infinity, px, py, pz
+      };
+      return out;
+    },
+
+    /* Surface nets put a vertex at the average of a cell's edge crossings,
+       which wobbles wherever two surfaces meet at a sharp angle — the hair
+       line, the hat brim, the corners of the grin. Two constrained Laplacian
+       passes fix it: relax each vertex toward its neighbours, then push it
+       straight back onto the isosurface along the field gradient, so nothing
+       shrinks or drifts off the model. */
+    relax(iters) {
+      const nv = out.count, ei = edges;
+      const sx = new Float64Array(nv), sy = new Float64Array(nv), sz = new Float64Array(nv);
+      const cn = new Uint16Array(nv);
+      const e = h * 0.40;
+
+      for (let it = 0; it < iters; it++) {
+        sx.fill(0); sy.fill(0); sz.fill(0); cn.fill(0);
+        for (let q = 0; q < ei.length; q += 2) {
+          const a = ei[q], b = ei[q + 1];
+          sx[a] += px[b]; sy[a] += py[b]; sz[a] += pz[b]; cn[a]++;
+          sx[b] += px[a]; sy[b] += py[a]; sz[b] += pz[a]; cn[b]++;
+        }
+        for (let v = 0; v < nv; v++) {
+          const c = cn[v];
+          if (c < 3) continue;
+          let x = px[v] + 0.34 * (sx[v] / c - px[v]);
+          let y = py[v] + 0.34 * (sy[v] / c - py[v]);
+          let z = pz[v] + 0.34 * (sz[v] / c - pz[v]);
+          /* tetrahedral stencil: four samples give both value and gradient */
+          const a1 = sdf(x + e, y - e, z - e), a2 = sdf(x - e, y - e, z + e);
+          const a3 = sdf(x - e, y + e, z - e), a4 = sdf(x + e, y + e, z + e);
+          let gx = a1 - a2 - a3 + a4, gy = -a1 - a2 + a3 + a4, gz = -a1 + a2 - a3 + a4;
+          const gl2 = Math.sqrt(gx * gx + gy * gy + gz * gz);
+          if (gl2 > 1e-9) {
+            /* the four samples average to the value at p; the field is unit
+               gradient, so one Newton step is a straight push along it */
+            const d = clamp((a1 + a2 + a3 + a4) * 0.25, -h * 1.4, h * 1.4) / gl2;
+            px[v] = x - gx * d; py[v] = y - gy * d; pz[v] = z - gz * d;
+          } else { px[v] = x; py[v] = y; pz[v] = z; }
+        }
+        relaxed++;
+        samples += nv * 4;
+      }
+    },
+
+    /* shade every vertex from the field: analytic normal, occlusion,
+       curvature and material. Sliced, because this is the slower half. */
+    shade(budgetMs) {
+      const now = () => (typeof performance !== "undefined" ? performance.now() : Date.now());
+      const until = now() + budgetMs;
+      const fv = new Float32Array(out.vertexData), bv = new Uint8Array(out.vertexData);
+      const e = h * 0.42, nv = out.count;
+
+      while (shaded < nv) {
+        const stop = Math.min(nv, shaded + 2048);
+        for (let v = shaded; v < stop; v++) {
+          const x = px[v], y = py[v], z = pz[v];
+          if (y < out.ymin) out.ymin = y;
+          if (y > out.ymax) out.ymax = y;
+
+          const xp = sdf(x + e, y, z), xm = sdf(x - e, y, z);
+          const yp = sdf(x, y + e, z), ym = sdf(x, y - e, z);
+          const zp = sdf(x, y, z + e), zm = sdf(x, y, z - e);
+          let gx = xp - xm, gy = yp - ym, gz = zp - zm;
+          const gl2 = Math.sqrt(gx * gx + gy * gy + gz * gz) || 1;
+          gx /= gl2; gy /= gl2; gz /= gl2;
+
+          /* discrete laplacian of the field: positive where convex */
+          const curv = (xp + xm + yp + ym + zp + zm) / (e * e);
+
+          /* ambient occlusion, marched along the normal. Each step is
+             normalised by its own radius so near and far occluders count
+             the same, which keeps thin shells from going blotchy. */
+          let occ = 0, wsum = 0, w = 1;
+          for (let q = 0; q < 5; q++) {
+            const r = AO_R[q];
+            occ += (r - sdf(x + gx * r, y + gy * r, z + gz * r)) / r * w;
+            wsum += w; w *= 0.78;
+          }
+          const ao = clamp(1 - 1.62 * occ / wsum, 0.02, 1);
+
+          const mi = materialAt(x, y, z), m = MATS[mi];
+          const o = v * 8;
+          fv[o] = x; fv[o + 1] = y; fv[o + 2] = z;
+          fv[o + 3] = gx; fv[o + 4] = gy; fv[o + 5] = gz;
+          const bo = v * 32 + 24;
+          bv[bo] = m.c[0] * 255; bv[bo + 1] = m.c[1] * 255; bv[bo + 2] = m.c[2] * 255;
+          bv[bo + 3] = ao * 255;
+          bv[bo + 4] = m.rough * 255;
+          bv[bo + 5] = m.sss * 255;
+          bv[bo + 6] = clamp(0.5 + curv * 0.010, 0, 1) * 255;
+          bv[bo + 7] = mi;
+        }
+        shaded = stop;
+        if (now() > until) break;
+      }
+      if (shaded >= nv) {
+        /* occlusion is sampled per vertex, so it carries a little of the
+           mesh's own noise; two passes along the edge list settle it */
+        const acc = new Float32Array(nv), cnt = new Uint16Array(nv);
+        for (let it = 0; it < 2; it++) {
+          acc.fill(0); cnt.fill(0);
+          for (let q = 0; q < edges.length; q += 2) {
+            const a = edges[q], b2 = edges[q + 1];
+            acc[a] += bv[b2 * 32 + 27]; cnt[a]++;
+            acc[b2] += bv[a * 32 + 27]; cnt[b2]++;
+          }
+          for (let v = 0; v < nv; v++)
+            if (cnt[v]) bv[v * 32 + 27] = bv[v * 32 + 27] * 0.45 + (acc[v] / cnt[v]) * 0.55;
+        }
+        out.ms = now() - t0;
+      }
+      return shaded >= nv;
+    },
+
+    get shadeProgress() { return out ? shaded / Math.max(out.count, 1) : 0; },
+    result() { return out; },
+    finish() { this.stitch(); this.relax(1); this.shade(1e9); return out; }
+  };
+}
+
+/* ==========================================================================
+   6 · Matrices
+   ========================================================================== */
+
+const m4 = {
+  ident: () => new Float32Array([1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1]),
+  mul(a, b, o) {
+    for (let c = 0; c < 4; c++) for (let r = 0; r < 4; r++) {
+      o[c * 4 + r] = a[r] * b[c * 4] + a[4 + r] * b[c * 4 + 1]
+                   + a[8 + r] * b[c * 4 + 2] + a[12 + r] * b[c * 4 + 3];
+    }
+    return o;
+  },
+  persp(fovy, asp, n, f) {
+    const t = 1 / Math.tan(fovy * 0.5);
+    return new Float32Array([t / asp,0,0,0, 0,t,0,0, 0,0,(f+n)/(n-f),-1, 0,0,2*f*n/(n-f),0]);
+  },
+  ortho(l, r, b, t, n, f) {
+    return new Float32Array([2/(r-l),0,0,0, 0,2/(t-b),0,0, 0,0,-2/(f-n),0,
+      -(r+l)/(r-l), -(t+b)/(t-b), -(f+n)/(f-n), 1]);
+  },
+  look(ex, ey, ez, cx, cy, cz) {
+    let zx = ex-cx, zy = ey-cy, zz = ez-cz;
+    let l = Math.hypot(zx,zy,zz) || 1; zx/=l; zy/=l; zz/=l;
+    let xx = zz, xy = 0, xz = -zx;                           /* up = (0,1,0) */
+    l = Math.hypot(xx,xy,xz);
+    if (l < 1e-5) { xx = 1; xy = 0; xz = 0; l = 1; }
+    xx/=l; xy/=l; xz/=l;
+    const yx = zy*xz - zz*xy, yy = zz*xx - zx*xz, yz = zx*xy - zy*xx;
+    return new Float32Array([
+      xx, yx, zx, 0, xy, yy, zy, 0, xz, yz, zz, 0,
+      -(xx*ex + xy*ey + xz*ez), -(yx*ex + yy*ey + yz*ez), -(zx*ex + zy*ey + zz*ez), 1]);
+  }
+};
+
+/* ==========================================================================
+   7 · Renderer
+   ========================================================================== */
+
+const canvas = document.getElementById("view");
+const gl = canvas.getContext("webgl2", { antialias: false, alpha: false, depth: false });
+if (!gl) {
+  document.getElementById("buildstep").textContent = "webgl 2 unavailable";
+  throw new Error("WebGL2 required");
+}
+const hasFloat = !!gl.getExtension("EXT_color_buffer_float");
+gl.getExtension("OES_texture_float_linear");
+
+function shader(type, src) {
+  const s = gl.createShader(type);
+  gl.shaderSource(s, src); gl.compileShader(s);
+  if (!gl.getShaderParameter(s, gl.COMPILE_STATUS))
+    throw new Error(gl.getShaderInfoLog(s) + "\n" + src.split("\n").map((l, i) => (i + 1) + ": " + l).join("\n"));
+  return s;
+}
+function program(vs, fs) {
+  const p = gl.createProgram();
+  gl.attachShader(p, shader(gl.VERTEX_SHADER, vs));
+  gl.attachShader(p, shader(gl.FRAGMENT_SHADER, fs));
+  gl.linkProgram(p);
+  if (!gl.getProgramParameter(p, gl.LINK_STATUS)) throw new Error(gl.getProgramInfoLog(p));
+  const u = {};
+  const n = gl.getProgramParameter(p, gl.ACTIVE_UNIFORMS);
+  for (let i = 0; i < n; i++) {
+    const info = gl.getActiveUniform(p, i);
+    u[info.name.replace("[0]", "")] = gl.getUniformLocation(p, info.name);
+  }
+  p.u = u;
+  return p;
+}
+
+/* ---- shared shader chunks --------------------------------------------- */
+
+const GLSL_FACE = `
+const vec3 C_HAIR   = vec3(0.133,0.118,0.114);
+const vec3 C_SCLERA = vec3(0.949,0.937,0.914);
+const vec3 C_IRIS   = vec3(0.078,0.066,0.062);
+const vec3 C_MOUTH  = vec3(0.255,0.088,0.086);
+const vec3 C_TEETH  = vec3(0.918,0.902,0.871);
+const vec3 C_SCAR   = vec3(0.741,0.427,0.365);
+
+float aa(float d){ float w = max(fwidth(d), 1e-6) * 0.85; return 1.0 - smoothstep(-w, w, d); }
+
+float sdEll(vec3 p, vec3 c, vec3 r){
+  vec3 q = p - c;
+  float k0 = length(q / r);
+  float k1 = length(q / (r * r));
+  return k0 * (k0 - 1.0) / max(k1, 1e-8);
+}
+float cap2(vec2 p, vec2 a, vec2 b, float r0, float r1){
+  vec2 pa = p - a, ba = b - a;
+  float h = clamp(dot(pa, ba) / dot(ba, ba), 0.0, 1.0);
+  return length(pa - ba * h) - mix(r0, r1, h);
+}
+
+/* the marks that are painted on skin rather than modelled into it */
+const float HS = 1.062, HP = 1.4650, HTY = 0.070, HTZ = -0.042;
+vec3 faceTint(vec3 w, vec3 base, float skin, inout float rough, inout float sss){
+  float cy = cos(HTY), sy = sin(HTY), cz = cos(HTZ), sz = sin(HTZ);
+  float py = w.y - HP;
+  float ux = w.x * cy - w.z * sy, uz = w.x * sy + w.z * cy;
+  vec3 p = vec3((ux * cz + py * sz) / HS, (-ux * sz + py * cz) / HS + HP, uz / HS);
+  float ax = abs(p.x);
+  vec3 col = base;
+
+  vec2 q = vec2((ax - 0.0520) / 0.0330, (p.y - 1.5885) / 0.0272);
+  float ql = length(q);
+  vec3 e3 = vec3((ax - 0.0520) / 0.0375, (p.y - 1.5885) / 0.0310, (p.z - 0.0555) / 0.0345);
+  vec3 u  = e3 / max(length(e3), 1e-5);
+  float inEye = aa(ql - 1.0) * skin * step(0.030, p.z);
+  vec3 eye = C_SCLERA;
+  eye = mix(eye, C_IRIS,   aa(0.7350 - dot(u, vec3(0.090, -0.115, 0.989))));
+  eye = mix(eye, C_HAIR,   aa(0.620 - q.y));
+  eye = mix(eye, C_HAIR,   1.0 - aa(ql - 0.925));
+  eye = mix(eye, vec3(1.0), aa(0.9890 - dot(u, vec3(-0.255, 0.300, 0.919))));
+
+  float front = step(0.020, p.z) * skin;
+  float brow  = aa(cap2(vec2(ax, p.y), vec2(0.0185, 1.6100), vec2(0.0800, 1.6180), 0.0084, 0.0044)) * front;
+  float scar  = aa(cap2(vec2(p.x, p.y), vec2(0.0625, 1.5490), vec2(0.0625, 1.5625), 0.0021, 0.0021)) * front;
+
+  float mby = p.y - (1.5100 + 5.0 * p.x * p.x);
+  vec3  pm  = vec3(p.x, mby, p.z);
+  float lip   = aa(sdEll(pm, vec3(0.0, 0.0,    0.0800), vec3(0.0745, 0.0282, 0.0430))) * skin;
+  float teeth = aa(sdEll(pm, vec3(0.0, 0.0045, 0.0800), vec3(0.0665, 0.0190, 0.0420))) * skin;
+
+  col = mix(col, C_MOUTH,  lip);
+  col = mix(col, C_TEETH,  teeth);
+  col = mix(col, C_SCAR,   scar);
+  col = mix(col, C_HAIR,   brow);
+  col = mix(col, eye,      inEye);
+
+  rough = mix(rough, 0.42, lip);
+  rough = mix(rough, 0.22, teeth);
+  rough = mix(rough, 0.13, inEye);
+  sss   = mix(sss,   0.95, scar);
+  sss   = mix(sss,   0.05, inEye);
+  return col;
+}`;
+
+const GLSL_LIGHT = `
+uniform float uLightRot;
+void rig(out vec3 kd, out vec3 fd, out vec3 rd){
+  float c = cos(uLightRot), s = sin(uLightRot);
+  mat3 R = mat3(c,0.0,-s, 0.0,1.0,0.0, s,0.0,c);
+  kd = normalize(R * vec3(-0.55, 0.74, 0.62));
+  fd = normalize(R * vec3( 0.88, 0.14, 0.40));
+  rd = normalize(R * vec3( 0.10, 0.30,-0.96));
+}
+const vec3 K_COL = vec3(1.000, 0.948, 0.862) * 3.30;
+const vec3 F_COL = vec3(0.480, 0.620, 0.880) * 0.68;
+const vec3 R_COL = vec3(0.980, 0.880, 0.780) * 1.25;
+
+float ggx(vec3 n, vec3 v, vec3 l, float rough){
+  vec3 h = normalize(v + l);
+  float a = max(rough * rough, 0.002);
+  float nh = max(dot(n, h), 0.0), nv = max(dot(n, v), 1e-4), nl = max(dot(n, l), 0.0);
+  float d = a * a / (3.14159 * pow(nh * nh * (a * a - 1.0) + 1.0, 2.0));
+  float k = a * 0.5;
+  float g = (nl / (nl * (1.0 - k) + k)) * (nv / (nv * (1.0 - k) + k));
+  float f = 0.04 + 0.96 * pow(1.0 - max(dot(h, v), 0.0), 5.0);
+  return d * g * f / (4.0 * nv * nl + 1e-4) * nl;
+}`;
+
+/* ---- main surface ------------------------------------------------------ */
+
+const VS_MAIN = `#version 300 es
+layout(location=0) in vec3 aPos;
+layout(location=1) in vec3 aNrm;
+layout(location=2) in vec4 aCol;   // rgb + ao
+layout(location=3) in vec4 aAux;   // rough, sss, curvature, material
+uniform mat4 uVP, uLightVP;
+out vec3 vPos, vNrm;
+out vec4 vCol, vAux;
+out vec4 vLight;
+void main(){
+  vPos = aPos; vNrm = aNrm; vCol = aCol; vAux = aAux;
+  vLight = uLightVP * vec4(aPos + aNrm * 0.0075, 1.0);
+  gl_Position = uVP * vec4(aPos, 1.0);
+}`;
+
+const FS_MAIN = `#version 300 es
+precision highp float;
+in vec3 vPos, vNrm;
+in vec4 vCol, vAux;
+in vec4 vLight;
+uniform vec3 uEye;
+uniform int uMode;
+uniform highp sampler2DShadow uShadow;
+uniform float uShadowTexel;
+out vec4 fragColor;
+${GLSL_FACE}
+${GLSL_LIGHT}
+
+float shadow(vec4 lp){
+  vec3 q = lp.xyz / lp.w * 0.5 + 0.5;
+  if (q.x < 0.002 || q.x > 0.998 || q.y < 0.002 || q.y > 0.998 || q.z > 1.0) return 1.0;
+  q.z -= 0.0011;
+  float s = 0.0;
+  for (int j = -1; j <= 1; j++)
+    for (int i = -1; i <= 1; i++)
+      s += texture(uShadow, vec3(q.xy + vec2(float(i), float(j)) * uShadowTexel, q.z));
+  return s / 9.0;
+}
+
+void main(){
+  vec3 n = normalize(vNrm);
+  vec3 v = normalize(uEye - vPos);
+  float ao = vCol.a;
+  float curv = vAux.z * 2.0 - 1.0;
+
+  if (uMode == 2) { fragColor = vec4(n * 0.5 + 0.5, 1.0); return; }
+  if (uMode == 3) { fragColor = vec4(vec3(ao * ao), 1.0); return; }
+  if (uMode == 4) {
+    vec3 warm = vec3(0.93, 0.62, 0.30), cool = vec3(0.24, 0.52, 0.78);
+    float t = clamp(curv * 2.4 + 0.5, 0.0, 1.0);
+    fragColor = vec4(mix(cool, vec3(0.16), smoothstep(0.0, 0.5, t)) + max(t - 0.5, 0.0) * 2.0 * warm, 1.0);
+    return;
+  }
+
+  vec3 base = vCol.rgb;
+  float rough = vAux.x, sss = vAux.y;
+  if (uMode == 0) {
+    float skin = 1.0 - step(0.5, vAux.w * 255.0);
+    base = faceTint(vPos, base, skin, rough, sss);
+  } else {
+    base = vec3(0.700, 0.686, 0.666); rough = 0.66; sss = 0.0;
+  }
+  base = pow(base, vec3(2.2));          /* authored sRGB -> linear */
+
+  vec3 kd, fd, rd; rig(kd, fd, rd);
+  float sh = shadow(vLight);
+
+  /* wrapped diffuse: skin does not fall to black at the terminator */
+  float w = 0.12 + 0.42 * sss;
+  float nk = max((dot(n, kd) + w) / (1.0 + w), 0.0);
+  float nf = max((dot(n, fd) + w) / (1.0 + w), 0.0);
+  float nr = max(dot(n, rd), 0.0);
+
+  vec3 diff = (K_COL * nk * mix(0.10, 1.0, sh) + F_COL * nf + R_COL * nr * 0.48)
+            * mix(0.84, 1.0, ao);
+
+  /* light bleeding through thin, backlit skin */
+  float trans = pow(clamp(dot(v, -kd) * 0.5 + 0.5, 0.0, 1.0), 3.0) * sss;
+  diff += K_COL * trans * 0.16 * vec3(1.0, 0.55, 0.42) * sh;
+
+  vec3 sky = vec3(0.300, 0.360, 0.480), grnd = vec3(0.180, 0.150, 0.125);
+  vec3 amb = mix(grnd, sky, n.y * 0.5 + 0.5) * 0.30 * ao;
+  amb *= 1.0 - 0.30 * clamp(-curv * 1.6, 0.0, 1.0);        /* creases sit deeper */
+
+  vec3 spec = (K_COL * ggx(n, v, kd, rough) * sh
+             + F_COL * ggx(n, v, fd, rough)
+             + R_COL * ggx(n, v, rd, rough) * 0.7) * mix(0.70, 0.24, sss * 0.5);
+
+  vec3 c = base * (diff * 0.30 + amb) + min(spec, vec3(1.05));
+  c += base * pow(1.0 - max(dot(n, v), 0.0), 4.0) * 0.07 * mix(0.4, 1.0, sh);
+  if (uMode == 5) c *= 0.42;
+  fragColor = vec4(c, 1.0);
+}`;
+
+/* ---- ground ------------------------------------------------------------ */
+
+const VS_GROUND = `#version 300 es
+layout(location=0) in vec3 aPos;
+uniform mat4 uVP, uLightVP;
+out vec3 vPos; out vec4 vLight;
+void main(){ vPos = aPos; vLight = uLightVP * vec4(aPos,1.0); gl_Position = uVP * vec4(aPos,1.0); }`;
+
+const FS_GROUND = `#version 300 es
+precision highp float;
+in vec3 vPos; in vec4 vLight;
+uniform highp sampler2DShadow uShadow;
+uniform float uShadowTexel;
+uniform vec3 uFog;
+out vec4 fragColor;
+void main(){
+  vec3 q = vLight.xyz / vLight.w * 0.5 + 0.5;
+  float s = 1.0;
+  if (q.x > 0.002 && q.x < 0.998 && q.y > 0.002 && q.y < 0.998 && q.z <= 1.0) {
+    q.z -= 0.0022; s = 0.0;
+    for (int j = -2; j <= 2; j++)
+      for (int i = -2; i <= 2; i++)
+        s += texture(uShadow, vec3(q.xy + vec2(float(i), float(j)) * uShadowTexel * 1.6, q.z));
+    s /= 25.0;
+  }
+  float r = length(vPos.xz);
+  vec3 c = mix(vec3(0.026, 0.028, 0.033), vec3(0.010, 0.011, 0.014), smoothstep(0.15, 1.6, r));
+  c *= mix(0.22, 1.0, s);
+  fragColor = vec4(mix(c, uFog, smoothstep(1.1, 2.9, r)), 1.0);
+}`;
+
+/* ---- shadow depth ------------------------------------------------------ */
+
+const VS_DEPTH = `#version 300 es
+layout(location=0) in vec3 aPos;
+uniform mat4 uLightVP;
+void main(){ gl_Position = uLightVP * vec4(aPos, 1.0); }`;
+const FS_DEPTH = `#version 300 es
+precision highp float;
+void main(){}`;
+
+/* ---- wireframe --------------------------------------------------------- */
+
+const FS_LINE = `#version 300 es
+precision highp float;
+in vec3 vPos, vNrm;
+in vec4 vCol, vAux;
+in vec4 vLight;
+uniform vec3 uEye;
+out vec4 fragColor;
+void main(){
+  float f = pow(1.0 - abs(dot(normalize(vNrm), normalize(uEye - vPos))), 1.4);
+  fragColor = vec4(mix(vec3(0.36, 0.40, 0.47), vec3(0.914, 0.725, 0.286), f), 1.0);
+}`;
+
+/* ---- post -------------------------------------------------------------- */
+
+const VS_QUAD = `#version 300 es
+out vec2 vUV;
+void main(){
+  vec2 p = vec2((gl_VertexID << 1) & 2, gl_VertexID & 2);
+  vUV = p; gl_Position = vec4(p * 2.0 - 1.0, 0.0, 1.0);
+}`;
+
+const FS_BRIGHT = `#version 300 es
+precision highp float;
+in vec2 vUV; uniform sampler2D uTex; out vec4 fragColor;
+void main(){
+  /* a stray sub-pixel highlight would otherwise bloom into a coloured blob,
+     so cap what any single texel can contribute */
+  vec3 c = min(texture(uTex, vUV).rgb, vec3(1.9));
+  float l = dot(c, vec3(0.2126, 0.7152, 0.0722));
+  fragColor = vec4(c * smoothstep(0.80, 1.6, l), 1.0);
+}`;
+
+const FS_BLUR = `#version 300 es
+precision highp float;
+in vec2 vUV; uniform sampler2D uTex; uniform vec2 uDir; out vec4 fragColor;
+void main(){
+  vec3 c = texture(uTex, vUV).rgb * 0.2270;
+  c += (texture(uTex, vUV + uDir * 1.3846).rgb + texture(uTex, vUV - uDir * 1.3846).rgb) * 0.3162;
+  c += (texture(uTex, vUV + uDir * 3.2308).rgb + texture(uTex, vUV - uDir * 3.2308).rgb) * 0.0702;
+  fragColor = vec4(c, 1.0);
+}`;
+
+const FS_POST = `#version 300 es
+precision highp float;
+in vec2 vUV;
+uniform sampler2D uScene, uBloom;
+uniform vec2 uPixel;
+uniform float uBloomAmt;
+out vec4 fragColor;
+vec3 aces(vec3 x){
+  return clamp((x * (2.51 * x + 0.03)) / (x * (2.43 * x + 0.59) + 0.14), 0.0, 1.0);
+}
+void main(){
+  vec3 c = texture(uScene, vUV).rgb + texture(uBloom, vUV).rgb * uBloomAmt;
+  c = aces(c * 1.06);
+  float l = dot(c, vec3(0.2126, 0.7152, 0.0722));
+  c = mix(vec3(l), c, 1.15);
+  vec2 q = vUV - 0.5;
+  c *= 1.0 - dot(q, q) * 0.52;
+  c += (fract(sin(dot(vUV, vec2(12.9898, 78.233))) * 43758.5453) - 0.5) * 0.0055;
+  fragColor = vec4(pow(max(c, 0.0), vec3(1.0 / 2.2)), 1.0);
+}`;
+
+const P_MAIN = program(VS_MAIN, FS_MAIN);
+const P_LINE = program(VS_MAIN, FS_LINE);
+const P_GROUND = program(VS_GROUND, FS_GROUND);
+const P_DEPTH = program(VS_DEPTH, FS_DEPTH);
+const P_BRIGHT = program(VS_QUAD, FS_BRIGHT);
+const P_BLUR = program(VS_QUAD, FS_BLUR);
+const P_POST = program(VS_QUAD, FS_POST);
+
+/* ==========================================================================
+   8 · Buffers, targets, camera
+   ========================================================================== */
+
+let mesh = null, vao = null, vbo = null, ibo = null, lbo = null;
+
+function uploadMesh(m) {
+  if (vao) { gl.deleteVertexArray(vao); gl.deleteBuffer(vbo); gl.deleteBuffer(ibo); gl.deleteBuffer(lbo); }
+  vao = gl.createVertexArray(); gl.bindVertexArray(vao);
+  vbo = gl.createBuffer(); gl.bindBuffer(gl.ARRAY_BUFFER, vbo);
+  gl.bufferData(gl.ARRAY_BUFFER, m.vertexData, gl.STATIC_DRAW);
+  const S = m.stride;
+  gl.enableVertexAttribArray(0); gl.vertexAttribPointer(0, 3, gl.FLOAT, false, S, 0);
+  gl.enableVertexAttribArray(1); gl.vertexAttribPointer(1, 3, gl.FLOAT, false, S, 12);
+  gl.enableVertexAttribArray(2); gl.vertexAttribPointer(2, 4, gl.UNSIGNED_BYTE, true, S, 24);
+  gl.enableVertexAttribArray(3); gl.vertexAttribPointer(3, 4, gl.UNSIGNED_BYTE, true, S, 28);
+  ibo = gl.createBuffer(); gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, ibo);
+  gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, m.index, gl.STATIC_DRAW);
+  lbo = gl.createBuffer();
+  gl.bindBuffer(gl.ARRAY_BUFFER, null);
+  gl.bindVertexArray(null);
+  gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, lbo);
+  gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, m.lineIndex, gl.STATIC_DRAW);
+  gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, null);
+  m.idxType = m.index.BYTES_PER_ELEMENT === 4 ? gl.UNSIGNED_INT : gl.UNSIGNED_SHORT;
+  mesh = m;
+}
+
+/* ---- ground disc ------------------------------------------------------- */
+const groundVao = gl.createVertexArray();
+let groundCount = 0, groundY = 0;
+(function buildGround() {
+  const seg = 128, pos = [0, 0, 0], idx = [];
+  for (let i = 0; i <= seg; i++) {
+    const a = i / seg * Math.PI * 2;
+    pos.push(Math.cos(a) * 3.0, 0, Math.sin(a) * 3.0);
+    if (i > 0) idx.push(0, i, i + 1);
+  }
+  gl.bindVertexArray(groundVao);
+  const b = gl.createBuffer(); gl.bindBuffer(gl.ARRAY_BUFFER, b);
+  gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(pos), gl.STATIC_DRAW);
+  gl.enableVertexAttribArray(0); gl.vertexAttribPointer(0, 3, gl.FLOAT, false, 0, 0);
+  const e = gl.createBuffer(); gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, e);
+  gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, new Uint16Array(idx), gl.STATIC_DRAW);
+  groundCount = idx.length;
+  gl.bindVertexArray(null);
+})();
+
+const quadVao = gl.createVertexArray();
+
+/* ---- shadow map -------------------------------------------------------- */
+const SHADOW = 2048;
+const shadowTex = gl.createTexture();
+gl.bindTexture(gl.TEXTURE_2D, shadowTex);
+gl.texStorage2D(gl.TEXTURE_2D, 1, gl.DEPTH_COMPONENT24, SHADOW, SHADOW);
+gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_COMPARE_MODE, gl.COMPARE_REF_TO_TEXTURE);
+gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_COMPARE_FUNC, gl.LEQUAL);
+const shadowFbo = gl.createFramebuffer();
+gl.bindFramebuffer(gl.FRAMEBUFFER, shadowFbo);
+gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.DEPTH_ATTACHMENT, gl.TEXTURE_2D, shadowTex, 0);
+gl.drawBuffers([gl.NONE]); gl.readBuffer(gl.NONE);
+gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+
+/* ---- scene + bloom targets -------------------------------------------- */
+const FMT = hasFloat ? gl.RGBA16F : gl.RGBA8;
+let W = 1, H = 1, msFbo, msCol, msDep, resFbo, resTex, bloom = [];
+const SAMPLES = Math.min(4, gl.getParameter(gl.MAX_SAMPLES));
+
+function tex2d(w, h, fmt) {
+  const t = gl.createTexture();
+  gl.bindTexture(gl.TEXTURE_2D, t);
+  gl.texStorage2D(gl.TEXTURE_2D, 1, fmt, w, h);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+  return t;
+}
+function fboFor(t) {
+  const f = gl.createFramebuffer();
+  gl.bindFramebuffer(gl.FRAMEBUFFER, f);
+  gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, t, 0);
+  gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+  return f;
+}
+
+function resize() {
+  const dpr = Math.min(window.devicePixelRatio || 1, 2);
+  const w = Math.max(2, Math.round(canvas.clientWidth * dpr));
+  const h = Math.max(2, Math.round(canvas.clientHeight * dpr));
+  if (w === W && h === H) return;
+  W = w; H = h; canvas.width = w; canvas.height = h;
+
+  if (msFbo) { gl.deleteFramebuffer(msFbo); gl.deleteRenderbuffer(msCol); gl.deleteRenderbuffer(msDep);
+               gl.deleteFramebuffer(resFbo); gl.deleteTexture(resTex);
+               bloom.forEach(b => { gl.deleteFramebuffer(b.f); gl.deleteTexture(b.t); }); }
+
+  msCol = gl.createRenderbuffer();
+  gl.bindRenderbuffer(gl.RENDERBUFFER, msCol);
+  gl.renderbufferStorageMultisample(gl.RENDERBUFFER, SAMPLES, FMT, W, H);
+  msDep = gl.createRenderbuffer();
+  gl.bindRenderbuffer(gl.RENDERBUFFER, msDep);
+  gl.renderbufferStorageMultisample(gl.RENDERBUFFER, SAMPLES, gl.DEPTH_COMPONENT24, W, H);
+  msFbo = gl.createFramebuffer();
+  gl.bindFramebuffer(gl.FRAMEBUFFER, msFbo);
+  gl.framebufferRenderbuffer(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.RENDERBUFFER, msCol);
+  gl.framebufferRenderbuffer(gl.FRAMEBUFFER, gl.DEPTH_ATTACHMENT, gl.RENDERBUFFER, msDep);
+
+  resTex = tex2d(W, H, FMT); resFbo = fboFor(resTex);
+  const bw = Math.max(2, W >> 1), bh = Math.max(2, H >> 1);
+  bloom = [0, 1].map(() => { const t = tex2d(bw, bh, FMT); return { t, f: fboFor(t), w: bw, h: bh }; });
+  gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+}
+
+/* ---- camera ------------------------------------------------------------ */
+const cam = { yaw: 0.30, pitch: 0.06, dist: 3.6, tx: 0, ty: 0.90, tz: 0, focal: 50, spin: 0.30 };
+
+function fovy() { return 2 * Math.atan(12 / cam.focal); }
+function frame() {
+  cam.ty = 0.90; cam.tx = 0; cam.tz = 0;
+  cam.dist = (MODEL.height * 0.62) / Math.tan(fovy() * 0.5);
+}
+
+/* ==========================================================================
+   9 · Build pipeline
+   ========================================================================== */
+
+const el = id => document.getElementById(id);
+const buildEl = el("build"), barEl = el("buildbar").firstElementChild, stepEl = el("buildstep");
+
+let builder = null, phase = "", firstBuild = true, voxel = 0.0058;
+
+let pump = 0;
+function startBuild(h) {
+  voxel = h;
+  builder = createBuild(h);
+  phase = "sample";
+  clearTimeout(pump);
+  const tick = () => { pumpBuild(); if (builder) pump = setTimeout(tick, 0); };
+  pump = setTimeout(tick, 0);
+  buildEl.style.display = "";
+  buildEl.classList.remove("done");
+  buildEl.classList.toggle("rebuild", !firstBuild);
+  barEl.style.width = "0%";
+  stepEl.textContent = "sampling the field";
+}
+
+function pumpBuild() {
+  if (!builder) return;
+  if (phase === "sample") {
+    if (builder.step(26)) {
+      phase = "stitch";
+      stepEl.textContent = "stitching quads";
+    }
+    barEl.style.width = (builder.progress * 55).toFixed(1) + "%";
+  } else if (phase === "stitch") {
+    builder.stitch();
+    phase = "relax";
+    stepEl.textContent = "relaxing the mesh";
+    barEl.style.width = "58%";
+  } else if (phase === "relax") {
+    builder.relax(1);
+    phase = "shade";
+    stepEl.textContent = "shading vertices";
+    barEl.style.width = "68%";
+  } else if (phase === "shade") {
+    const done = builder.shade(26);
+    barEl.style.width = (68 + builder.shadeProgress * 32).toFixed(1) + "%";
+    if (done) {
+      const m = builder.result();
+      uploadMesh(m);
+      groundY = m.ymin - 0.001;
+      showStats(m);
+      builder = null; phase = "";
+      buildEl.classList.add("done");
+      setTimeout(() => { buildEl.style.display = "none"; }, 620);
+      firstBuild = false;
+    }
+  }
+}
+
+const fmt = n => n.toLocaleString("en-US");
+function showStats(m) {
+  el("stTris").textContent = fmt(m.tris);
+  el("stVerts").textContent = fmt(m.count);
+  el("stVox").textContent = (m.voxel * 1000).toFixed(2) + " mm";
+  el("stField").textContent = (m.samples / 1e6).toFixed(2) + " M";
+  el("stTime").textContent = (m.ms / 1000).toFixed(2) + " s";
+  el("stHeight").textContent = (m.ymax - m.ymin).toFixed(3) + " m";
+}
+
+/* ==========================================================================
+   10 · Frame
+   ========================================================================== */
+
+const VP = new Float32Array(16), LVP = new Float32Array(16);
+let mode = 0, lightRot = -22 * Math.PI / 180, showGround = true;
+const BG = [0.0046, 0.0053, 0.0066];
+
+function drawScene(prog, eye) {
+  gl.useProgram(prog);
+  gl.uniformMatrix4fv(prog.u.uVP, false, VP);
+  gl.uniformMatrix4fv(prog.u.uLightVP, false, LVP);
+  if (prog.u.uEye) gl.uniform3f(prog.u.uEye, eye[0], eye[1], eye[2]);
+  if (prog.u.uMode) gl.uniform1i(prog.u.uMode, mode);
+  if (prog.u.uLightRot) gl.uniform1f(prog.u.uLightRot, lightRot);
+  if (prog.u.uShadow) { gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, shadowTex);
+                        gl.uniform1i(prog.u.uShadow, 0); gl.uniform1f(prog.u.uShadowTexel, 1 / SHADOW); }
+}
+
+let last = 0, turn = 0;
+function render(now) {
+  requestAnimationFrame(render);
+  const dt = Math.min((now - last) / 1000 || 0, 0.05); last = now;
+  resize();
+
+  if (el("spin").checked) { turn += dt * cam.spin; cam.yaw += dt * cam.spin; }
+  el("gaugeVal").textContent = String(Math.round(((cam.yaw * 180 / Math.PI) % 360 + 360) % 360)).padStart(3, "0") + "°";
+
+  const cp = Math.cos(cam.pitch), sp = Math.sin(cam.pitch);
+  const eye = [cam.tx + Math.sin(cam.yaw) * cp * cam.dist,
+               cam.ty + sp * cam.dist,
+               cam.tz + Math.cos(cam.yaw) * cp * cam.dist];
+  const view = m4.look(eye[0], eye[1], eye[2], cam.tx, cam.ty, cam.tz);
+  const proj = m4.persp(fovy(), W / H, 0.05, 20);
+  m4.mul(proj, view, VP);
+
+  /* light-space matrix, fitted to the figure */
+  const c = Math.cos(lightRot), s = Math.sin(lightRot);
+  const kd = [-0.55 * c + 0.62 * s, 0.74, 0.55 * s + 0.62 * c];   /* matches rig() */
+  const kl = Math.hypot(kd[0], kd[1], kd[2]);
+  const L = [kd[0] / kl, kd[1] / kl, kd[2] / kl];
+  const lv = m4.look(L[0] * 2.6, 0.90 + L[1] * 2.6, L[2] * 2.6, 0, 0.90, 0);
+  m4.mul(m4.ortho(-1.05, 1.05, -1.05, 1.05, 0.1, 5.2), lv, LVP);
+
+  if (!mesh) return;
+
+  /* shadow */
+  gl.bindFramebuffer(gl.FRAMEBUFFER, shadowFbo);
+  gl.viewport(0, 0, SHADOW, SHADOW);
+  gl.enable(gl.DEPTH_TEST); gl.depthMask(true); gl.depthFunc(gl.LEQUAL);
+  gl.clear(gl.DEPTH_BUFFER_BIT);
+  gl.disable(gl.CULL_FACE);
+  gl.enable(gl.POLYGON_OFFSET_FILL); gl.polygonOffset(2.6, 5.0);
+  gl.useProgram(P_DEPTH);
+  gl.uniformMatrix4fv(P_DEPTH.u.uLightVP, false, LVP);
+  gl.bindVertexArray(vao);
+  gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, ibo);
+  gl.drawElements(gl.TRIANGLES, mesh.index.length, mesh.idxType, 0);
+  gl.disable(gl.POLYGON_OFFSET_FILL);
+
+  /* scene */
+  gl.bindFramebuffer(gl.FRAMEBUFFER, msFbo);
+  gl.viewport(0, 0, W, H);
+  gl.clearColor(BG[0], BG[1], BG[2], 1);
+  gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
+
+  if (showGround) {
+    gl.disable(gl.CULL_FACE);
+    drawScene(P_GROUND, eye);
+    gl.uniform3f(P_GROUND.u.uFog, BG[0], BG[1], BG[2]);
+    gl.bindVertexArray(groundVao);
+    /* the disc lives at y = 0 in its buffer; slide it under the soles */
+    const gm = new Float32Array(VP);
+    gm[12] += VP[4] * groundY; gm[13] += VP[5] * groundY;
+    gm[14] += VP[6] * groundY; gm[15] += VP[7] * groundY;
+    gl.uniformMatrix4fv(P_GROUND.u.uVP, false, gm);
+    const gl2 = new Float32Array(LVP);
+    gl2[12] += LVP[4] * groundY; gl2[13] += LVP[5] * groundY;
+    gl2[14] += LVP[6] * groundY; gl2[15] += LVP[7] * groundY;
+    gl.uniformMatrix4fv(P_GROUND.u.uLightVP, false, gl2);
+    gl.drawElements(gl.TRIANGLES, groundCount, gl.UNSIGNED_SHORT, 0);
+    gl.enable(gl.CULL_FACE);
+  }
+
+  gl.disable(gl.CULL_FACE);
+  drawScene(P_MAIN, eye);
+  gl.bindVertexArray(vao);
+  gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, ibo);
+  gl.drawElements(gl.TRIANGLES, mesh.index.length, mesh.idxType, 0);
+
+  if (mode === 5) {
+    drawScene(P_LINE, eye);
+    gl.bindVertexArray(vao);
+    gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, lbo);
+    gl.drawElements(gl.LINES, mesh.lineIndex.length, mesh.idxType, 0);
+  }
+
+  /* resolve + post */
+  gl.bindFramebuffer(gl.READ_FRAMEBUFFER, msFbo);
+  gl.bindFramebuffer(gl.DRAW_FRAMEBUFFER, resFbo);
+  gl.blitFramebuffer(0, 0, W, H, 0, 0, W, H, gl.COLOR_BUFFER_BIT, gl.NEAREST);
+
+  gl.disable(gl.DEPTH_TEST); gl.disable(gl.CULL_FACE);
+  gl.bindVertexArray(quadVao);
+  const b0 = bloom[0], b1 = bloom[1];
+
+  gl.bindFramebuffer(gl.FRAMEBUFFER, b0.f); gl.viewport(0, 0, b0.w, b0.h);
+  gl.useProgram(P_BRIGHT); gl.activeTexture(gl.TEXTURE0);
+  gl.bindTexture(gl.TEXTURE_2D, resTex); gl.uniform1i(P_BRIGHT.u.uTex, 0);
+  gl.drawArrays(gl.TRIANGLES, 0, 3);
+
+  gl.useProgram(P_BLUR); gl.uniform1i(P_BLUR.u.uTex, 0);
+  for (let i = 0; i < 2; i++) {
+    gl.bindFramebuffer(gl.FRAMEBUFFER, b1.f);
+    gl.bindTexture(gl.TEXTURE_2D, b0.t);
+    gl.uniform2f(P_BLUR.u.uDir, 1 / b0.w, 0);
+    gl.drawArrays(gl.TRIANGLES, 0, 3);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, b0.f);
+    gl.bindTexture(gl.TEXTURE_2D, b1.t);
+    gl.uniform2f(P_BLUR.u.uDir, 0, 1 / b0.h);
+    gl.drawArrays(gl.TRIANGLES, 0, 3);
+  }
+
+  gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+  gl.viewport(0, 0, W, H);
+  gl.useProgram(P_POST);
+  gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, resTex);
+  gl.activeTexture(gl.TEXTURE1); gl.bindTexture(gl.TEXTURE_2D, b0.t);
+  gl.uniform1i(P_POST.u.uScene, 0); gl.uniform1i(P_POST.u.uBloom, 1);
+  gl.uniform2f(P_POST.u.uPixel, 1 / W, 1 / H);
+  gl.uniform1f(P_POST.u.uBloomAmt, mode === 0 ? 0.42 : 0.16);
+  gl.drawArrays(gl.TRIANGLES, 0, 3);
+  gl.bindVertexArray(null);
+}
+
+/* ==========================================================================
+   11 · Controls
+   ========================================================================== */
+
+let drag = null;
+canvas.addEventListener("pointerdown", e => {
+  canvas.setPointerCapture(e.pointerId);
+  drag = { x: e.clientX, y: e.clientY, pan: e.shiftKey || e.button === 1 };
+  el("spin").checked = false;
+});
+canvas.addEventListener("pointermove", e => {
+  if (!drag) return;
+  const dx = e.clientX - drag.x, dy = e.clientY - drag.y;
+  drag.x = e.clientX; drag.y = e.clientY;
+  if (drag.pan) {
+    const k = cam.dist * Math.tan(fovy() * 0.5) * 2 / canvas.clientHeight;
+    cam.tx -= Math.cos(cam.yaw) * dx * k;
+    cam.tz += Math.sin(cam.yaw) * dx * k;
+    cam.ty += dy * k;
+  } else {
+    cam.yaw -= dx * 0.006;
+    cam.pitch = clamp(cam.pitch + dy * 0.005, -1.35, 1.35);
+  }
+});
+const endDrag = () => { drag = null; };
+canvas.addEventListener("pointerup", endDrag);
+canvas.addEventListener("pointercancel", endDrag);
+canvas.addEventListener("wheel", e => {
+  e.preventDefault();
+  cam.dist = clamp(cam.dist * Math.exp(e.deltaY * 0.0011), 0.28, 12);
+}, { passive: false });
+
+addEventListener("keydown", e => {
+  if (e.key === "f" || e.key === "F") frame();
+  const n = "123456".indexOf(e.key);
+  if (n >= 0) setMode(n);
+});
+
+function setMode(m) {
+  mode = m;
+  for (const b of document.querySelectorAll("#seg-shade button, #seg-shade2 button"))
+    b.setAttribute("aria-pressed", String(+b.dataset.v === m));
+}
+for (const b of document.querySelectorAll("#seg-shade button, #seg-shade2 button"))
+  b.addEventListener("click", () => setMode(+b.dataset.v));
+
+const RES_NAME = { "0.0095": "draft", "0.0058": "fine", "0.0042": "ultra" };
+for (const b of document.querySelectorAll("#seg-res button")) {
+  b.addEventListener("click", () => {
+    if (builder) return;
+    for (const o of document.querySelectorAll("#seg-res button")) o.setAttribute("aria-pressed", String(o === b));
+    el("resLabel").textContent = RES_NAME[b.dataset.v];
+    startBuild(+b.dataset.v);
+  });
+}
+
+el("lightRot").addEventListener("input", e => {
+  lightRot = +e.target.value * Math.PI / 180;
+  el("lightLabel").textContent = e.target.value + "°";
+});
+el("fov").addEventListener("input", e => {
+  cam.focal = +e.target.value;
+  el("fovLabel").textContent = e.target.value + "mm";
+});
+el("showGround").addEventListener("change", e => { showGround = e.target.checked; });
+el("showHat").addEventListener("change", e => {
+  MODEL.hat = e.target.checked;
+  if (!builder) startBuild(voxel);
+});
+el("btnFront").addEventListener("click", () => {
+  el("spin").checked = false;
+  cam.yaw = 0; cam.pitch = 0.02; frame();
+});
+
+/* ---- OBJ ---------------------------------------------------------------- */
+el("btnObj").addEventListener("click", () => {
+  if (!mesh) return;
+  const F = new Float32Array(mesh.vertexData), U = new Uint8Array(mesh.vertexData);
+  const out = ["# Monkey D. Luffy — signed distance field, surface nets",
+               "# " + mesh.count + " vertices, " + mesh.tris + " triangles, voxel " +
+               (mesh.voxel * 1000).toFixed(2) + " mm", "o Luffy"];
+  for (let v = 0; v < mesh.count; v++) {
+    const o = v * 8, x = F[o], y = F[o + 1], z = F[o + 2];
+    const m = MATS[faceMaterial(x, y, z, U[v * 32 + 31])];
+    out.push("v " + x.toFixed(5) + " " + y.toFixed(5) + " " + z.toFixed(5) + " " +
+             m.c[0].toFixed(4) + " " + m.c[1].toFixed(4) + " " + m.c[2].toFixed(4));
+  }
+  for (let v = 0; v < mesh.count; v++) {
+    const o = v * 8;
+    out.push("vn " + F[o + 3].toFixed(4) + " " + F[o + 4].toFixed(4) + " " + F[o + 5].toFixed(4));
+  }
+  const idx = mesh.index;
+  for (let t = 0; t < idx.length; t += 3) {
+    const a = idx[t] + 1, b = idx[t + 1] + 1, c = idx[t + 2] + 1;
+    out.push("f " + a + "//" + a + " " + b + "//" + b + " " + c + "//" + c);
+  }
+  const blob = new Blob([out.join("\n")], { type: "text/plain" });
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(blob);
+  a.download = "luffy-" + (mesh.voxel * 1000).toFixed(1) + "mm.obj";
+  a.click();
+  setTimeout(() => URL.revokeObjectURL(a.href), 4000);
+});
+
+/* ---- go ---------------------------------------------------------------- */
+frame();
+resize();
+startBuild(0.0058);
+requestAnimationFrame(render);
+</script>
+</body>
+</html>
