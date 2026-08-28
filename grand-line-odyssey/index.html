@@ -1181,6 +1181,48 @@ function buildCylinder(seg = 14, capped = true) {
   }
   return { p, n, idx };
 }
+/* a cylinder whose top radius differs from the bottom: limbs, hats, sleeves */
+function buildTaper(seg = 16, topR = 0.72) {
+  const p = [], n = [], idx = [];
+  const slope = (0.5 - 0.5 * topR);
+  for (let i = 0; i <= seg; i++) {
+    const th = i / seg * TAU, cx = Math.cos(th), cz = Math.sin(th);
+    const ny = slope * 2;
+    const nl = Math.hypot(1, ny);
+    p.push(cx * .5, -.5, cz * .5); n.push(cx / nl, ny / nl, cz / nl);
+    p.push(cx * .5 * topR, .5, cz * .5 * topR); n.push(cx / nl, ny / nl, cz / nl);
+  }
+  for (let i = 0; i < seg; i++) { const a = i * 2; idx.push(a, a + 1, a + 2, a + 1, a + 3, a + 2); }
+  for (const s of [1, -1]) {
+    const base = p.length / 3, r = s > 0 ? .5 * topR : .5;
+    p.push(0, s * .5, 0); n.push(0, s, 0);
+    for (let i = 0; i <= seg; i++) {
+      const th = i / seg * TAU; p.push(Math.cos(th) * r, s * .5, Math.sin(th) * r); n.push(0, s, 0);
+    }
+    for (let i = 0; i < seg; i++) {
+      if (s > 0) idx.push(base, base + 2 + i, base + 1 + i); else idx.push(base, base + 1 + i, base + 2 + i);
+    }
+  }
+  return { p, n, idx };
+}
+/* torus: hat brims, rings, straw-hat cord */
+function buildTorus(seg = 24, ring = 10, tube = 0.16) {
+  const p = [], n = [], idx = [];
+  for (let i = 0; i <= seg; i++) {
+    const u = i / seg * TAU, cu = Math.cos(u), su = Math.sin(u);
+    for (let j = 0; j <= ring; j++) {
+      const v = j / ring * TAU, cv = Math.cos(v), sv = Math.sin(v);
+      const r = 0.5 - tube + tube * cv;
+      p.push(cu * r, tube * sv, su * r);
+      n.push(cu * cv, sv, su * cv);
+    }
+  }
+  for (let i = 0; i < seg; i++) for (let j = 0; j < ring; j++) {
+    const a = i * (ring + 1) + j, b = a + ring + 1;
+    idx.push(a, a + 1, b, a + 1, b + 1, b);
+  }
+  return { p, n, idx };
+}
 function buildCone(seg = 14) {
   const p = [], n = [], idx = [];
   for (let i = 0; i <= seg; i++) {
@@ -1257,15 +1299,16 @@ class InstBatch {
   }
 }
 
-const MESHES = { box: buildBox(), sphere: buildSphere(), cyl: buildCylinder(), cone: buildCone(), lowsphere: buildSphere(8, 6) };
-const BATCH = {
-  box: new InstBatch(MESHES.box), sphere: new InstBatch(MESHES.sphere),
-  cyl: new InstBatch(MESHES.cyl), cone: new InstBatch(MESHES.cone), lowsphere: new InstBatch(MESHES.lowsphere)
+const MESHES = {
+  box: buildBox(), sphere: buildSphere(), cyl: buildCylinder(), cone: buildCone(),
+  lowsphere: buildSphere(8, 6),
+  ball: buildSphere(22, 14),          // smooth: heads, joints, eyes
+  limb: buildTaper(16, 0.74),         // tapered limb segment
+  limb2: buildTaper(16, 0.92),        // near-cylindrical limb
+  torus: buildTorus(26, 10, 0.10),
 };
-const BATCH_T = {
-  box: new InstBatch(MESHES.box), sphere: new InstBatch(MESHES.sphere),
-  cyl: new InstBatch(MESHES.cyl), cone: new InstBatch(MESHES.cone), lowsphere: new InstBatch(MESHES.lowsphere)
-};
+const BATCH = {}, BATCH_T = {};
+for (const k in MESHES) { BATCH[k] = new InstBatch(MESHES[k]); BATCH_T[k] = new InstBatch(MESHES[k]); }
 
 /* scratch matrix used for every push */
 const _m = M4.id();
@@ -1446,11 +1489,28 @@ const ISLAND_SPECS = [
 const TERRAIN_RES = 145;
 
 function genIsland(spec, progress) {
-  const N = TERRAIN_RES;
+  const N = spec.res || TERRAIN_RES;
   const half = spec.r * 1.30;
   const nz = makeNoise(spec.seed);
   const H = new Float32Array(N * N);
   const step = (half * 2) / (N - 1);
+  const shapeRng = mulberry(spec.seed * 31 + 7);
+
+  /* extra landmasses so islands are not discs: headlands, spits and bays */
+  const lobes = [];
+  const lobeCount = spec.lobes === undefined ? 3 + Math.floor(shapeRng() * 3) : spec.lobes;
+  for (let i = 0; i < lobeCount; i++) {
+    const a = shapeRng() * TAU;
+    const d = spec.r * (0.35 + shapeRng() * 0.62);
+    lobes.push({
+      x: Math.cos(a) * d, z: Math.sin(a) * d,
+      r: spec.r * (0.24 + shapeRng() * 0.34),
+      h: 0.35 + shapeRng() * 0.85,
+      neg: shapeRng() < 0.34            // a bay instead of a headland
+    });
+  }
+  const cliffAngle = shapeRng() * TAU;
+  const cliffWidth = 0.7 + shapeRng() * 0.9;
 
   const townR = spec.town ? spec.town.r : 0;
   const tx = spec.town ? spec.town.x : 0, tz = spec.town ? spec.town.z : 0;
@@ -1467,9 +1527,24 @@ function genIsland(spec, progress) {
       const wob = nz.fbm(Math.cos(ang) * 2.1 + 10, Math.sin(ang) * 2.1 + 10, 4) * 0.24
         + nz.fbm(Math.cos(ang) * 5.3 + 3, Math.sin(ang) * 5.3 + 3, 3) * 0.10;
       base = 1 - smoothstep(0.42 + wob * 0.5, 1.02 + wob, d);
+      // headlands and bays reshape the coast
+      for (const lb of lobes) {
+        const ld = Math.hypot(x - lb.x, z - lb.z) / lb.r;
+        if (ld < 1) {
+          const w = Math.pow(1 - ld, 1.7);
+          base = lb.neg ? Math.max(0, base - w * 0.85) : Math.min(1.25, base + w * lb.h);
+        }
+      }
       let n = nz.fbm(x * 0.0042 + 5, z * 0.0042 + 5, 5) * 0.5 + 0.5;
       let ridge = nz.ridged(x * 0.0031 + 30, z * 0.0031 + 30, 4);
       let h = spec.peak * base * (0.30 + 0.62 * n) + spec.peak * 0.55 * Math.pow(base, 2.4) * ridge;
+      // one stretch of coast rises as a cliff wall
+      if (spec.cliffs !== false) {
+        const ang2 = Math.atan2(z, x);
+        let da = Math.abs(((ang2 - cliffAngle + PI) % TAU + TAU) % TAU - PI);
+        const cliffMask = Math.max(0, 1 - da / cliffWidth) * smoothstep(0.55, 0.95, d) * smoothstep(1.15, 0.92, d);
+        h += cliffMask * spec.peak * 0.55;
+      }
       if (spec.id === 'reverse') {
         // single towering mountain with a cleft
         const dd = Math.hypot(x, z);
@@ -1479,8 +1554,9 @@ function genIsland(spec, progress) {
         h -= cleft * spec.peak * 0.92;
         h = Math.max(h, -6 + base * 8);
       }
-      // beach shelf
-      h -= smoothstep(0.78, 1.06, d) * 14;
+      // beach shelf, then a real drop-off so the sea floor meets open-ocean depth
+      h -= smoothstep(0.80, 1.04, d) * 13;
+      h -= smoothstep(1.00, 1.30, d) * 50;
       // town flattening
       if (townR > 0) {
         const td = Math.hypot(x - tx, z - tz);
@@ -1495,13 +1571,13 @@ function genIsland(spec, progress) {
     spec, id: spec.id, name: spec.name, sub: spec.sub, x: spec.x, z: spec.z, r: spec.r,
     H, N, half, step, biome: BIOMES[spec.biome], biomeName: spec.biome,
     props: [], colliders: [], npcs: [], enemies: [], chests: [], markers: {},
-    coastR: spec.r * 0.86, discovered: false, nz
+    coastR: spec.r * 0.86, discovered: false, nz, paths: [], platforms: []
   };
 
   /* --- CPU height sampling (local coords) --- */
   isl.heightLocal = function (x, z) {
     const fx = (x + half) / step, fz = (z + half) / step;
-    if (fx < 0 || fz < 0 || fx >= N - 1 || fz >= N - 1) return -18;
+    if (fx < 0 || fz < 0 || fx >= N - 1 || fz >= N - 1) return -60;
     const i = fx | 0, j = fz | 0, u = fx - i, v = fz - j;
     const h00 = H[j * N + i], h10 = H[j * N + i + 1], h01 = H[(j + 1) * N + i], h11 = H[(j + 1) * N + i + 1];
     return lerp(lerp(h00, h10, u), lerp(h01, h11, u), v);
@@ -1529,9 +1605,108 @@ function genIsland(spec, progress) {
   }
   isl.coastR = sum / cnt;
 
+  layoutPaths(isl);          // beach -> town, before props so nothing is placed on the road
+  scatterProps(isl);         // props and landmarks
+  addLandmarkPath(isl);      // town -> the island's landmark, now that it exists
+  for (const p of isl.props) {                       // paths dented the ground; re-seat everything
+    if (p.kind === 'plank' || p.kind === 'baratie') continue;
+    const gy = isl.heightLocal(p.x, p.z);
+    if (gy > -3) p.y = p.kind === 'rock' ? gy - (p.sc || 1) * 0.28 : gy;
+  }
   buildIslandMesh(isl);
-  scatterProps(isl);
   return isl;
+}
+function addLandmarkPath(isl) {
+  const lm = isl.markers && isl.markers.boss;
+  const t = isl.spec.town;
+  if (!lm || !t || isl.spec.id === 'baratie') return;
+  const pts = [];
+  const segs = 16;
+  const r2 = mulberry(isl.spec.seed * 23 + 11);
+  const bend = (r2() - 0.5) * isl.r * 0.22;
+  const nx = -(lm.z - t.z), nz2 = (lm.x - t.x);
+  const nl = Math.hypot(nx, nz2) || 1;
+  for (let i = 0; i <= segs; i++) {
+    const u = i / segs;
+    const b = Math.sin(u * PI) * bend;
+    pts.push({ x: lerp(t.x, lm.x, u) + nx / nl * b, z: lerp(t.z, lm.z, u) + nz2 / nl * b });
+  }
+  isl.paths.push(pts);
+  const N = isl.N, half = isl.half, step = isl.step;
+  for (const pt of pts) {
+    const i0 = Math.max(0, Math.floor((pt.x - 7 + half) / step)), i1 = Math.min(N - 1, Math.ceil((pt.x + 7 + half) / step));
+    const j0 = Math.max(0, Math.floor((pt.z - 7 + half) / step)), j1 = Math.min(N - 1, Math.ceil((pt.z + 7 + half) / step));
+    for (let j = j0; j <= j1; j++) for (let i = i0; i <= i1; i++) {
+      const x = -half + i * step, z = -half + j * step;
+      const d = Math.hypot(x - pt.x, z - pt.z);
+      if (d > 7) continue;
+      const w = (1 - d / 7) * 0.22;
+      const idx = j * N + i;
+      if (isl.H[idx] > 1.0) isl.H[idx] = lerp(isl.H[idx], isl.H[idx] - 0.3, w);
+    }
+  }
+}
+
+/* a walked-in dirt path between the landing beach, the town and the landmark */
+function layoutPaths(isl) {
+  const spec = isl.spec;
+  if (!spec.town || spec.id === 'baratie') return;
+  const t = spec.town;
+  const ang = spec.dock ? Math.atan2(spec.dock.z, spec.dock.x) : 0;
+  const beach = { x: Math.cos(ang) * (isl.coastR - 16), z: Math.sin(ang) * (isl.coastR - 16) };
+  const town = { x: t.x, z: t.z };
+  const mk = (a, b, wobble) => {
+    const pts = [];
+    const segs = 18;
+    const nx = -(b.z - a.z), nz2 = (b.x - a.x);
+    const nl = Math.hypot(nx, nz2) || 1;
+    for (let i = 0; i <= segs; i++) {
+      const u = i / segs;
+      const bend = Math.sin(u * PI) * wobble;
+      pts.push({
+        x: lerp(a.x, b.x, u) + nx / nl * bend,
+        z: lerp(a.z, b.z, u) + nz2 / nl * bend,
+      });
+    }
+    isl.paths.push(pts);
+  };
+  const r2 = mulberry(spec.seed * 17 + 5);
+  mk(beach, town, (r2() - 0.5) * isl.r * 0.35);
+  // a second path out to the island's landmark, if it has one
+  const lm = isl.markers && isl.markers.boss;
+  if (lm) mk(town, lm, (r2() - 0.5) * isl.r * 0.25);
+  // flatten the ground a little along the paths so they are walkable
+  const N = isl.N, half = isl.half, step = isl.step;
+  for (const pts of isl.paths) {
+    for (const pt of pts) {
+      const i0 = Math.max(0, Math.floor((pt.x - 7 + half) / step)), i1 = Math.min(N - 1, Math.ceil((pt.x + 7 + half) / step));
+      const j0 = Math.max(0, Math.floor((pt.z - 7 + half) / step)), j1 = Math.min(N - 1, Math.ceil((pt.z + 7 + half) / step));
+      for (let j = j0; j <= j1; j++) for (let i = i0; i <= i1; i++) {
+        const x = -half + i * step, z = -half + j * step;
+        const d = Math.hypot(x - pt.x, z - pt.z);
+        if (d > 7) continue;
+        const w = (1 - d / 7) * 0.25;
+        const idx = j * N + i;
+        if (isl.H[idx] > 1.0) isl.H[idx] = lerp(isl.H[idx], isl.H[idx] - 0.35, w);
+      }
+    }
+  }
+}
+function pathDistance(isl, x, z) {
+  let best = 1e9;
+  for (const pts of isl.paths) {
+    for (let i = 0; i < pts.length - 1; i++) {
+      const a = pts[i], b = pts[i + 1];
+      const dx = b.x - a.x, dz = b.z - a.z;
+      const len2 = dx * dx + dz * dz || 1;
+      let u = ((x - a.x) * dx + (z - a.z) * dz) / len2;
+      u = u < 0 ? 0 : (u > 1 ? 1 : u);
+      const px = a.x + dx * u, pz = a.z + dz * u;
+      const d = Math.hypot(x - px, z - pz);
+      if (d < best) best = d;
+    }
+  }
+  return best;
 }
 
 function terrainColor(b, h, slope, peak, nzv) {
@@ -1569,6 +1744,14 @@ function buildIslandMesh(isl) {
       const slope = 1 - ny;
       const nv = isl.nz.fbm(x * 0.06, z * 0.06, 3) * 0.5 + 0.5;
       const c = terrainColor(biome, h, slope, isl.spec.peak, nv);
+      if (isl.paths.length && h > 0.6) {
+        const pd = pathDistance(isl, x, z);
+        if (pd < 7.5) {
+          const w = (1 - smoothstep(3.4, 7.5, pd)) * 0.95;
+          const dirt = [0.62, 0.50, 0.34];
+          c[0] = lerp(c[0], dirt[0], w); c[1] = lerp(c[1], dirt[1], w); c[2] = lerp(c[2], dirt[2], w);
+        }
+      }
       // cheap AO: cavity from neighbour average
       const avg = (hl + hr + hd + hu) / 4;
       const ao = clamp(1 - clamp((avg - h) / 9, 0, 1) * 0.55, 0.45, 1);
@@ -1643,7 +1826,7 @@ function makeHouse(isl, x, z, ry, style, r, scale = 1) {
   const w = (7 + r() * 5) * scale, d = (6 + r() * 5) * scale, hh = (5 + r() * 3.4) * scale;
   const y = isl.heightLocal(x, z);
   addProp(isl, 'house', x, y, z, ry, scale, wall, { w, d, hh, roof, style, ruined: style === 'ruined' && r() < .45 });
-  addCollider(isl, x, z, Math.max(w, d) * 0.56, hh + 2);
+  addCollider(isl, x, z, Math.max(w, d) * 0.5, hh + 2);
   return { w, d, hh };
 }
 
@@ -1653,7 +1836,7 @@ function scatterProps(isl) {
   const R = isl.r;
 
   /* trees & rocks */
-  const treeCount = Math.floor(260 * b.treeDensity * (R / 320));
+  const treeCount = Math.floor(560 * b.treeDensity * (R / 320));
   for (let i = 0; i < treeCount; i++) {
     const a = r() * TAU, rad = Math.sqrt(r()) * R * 1.02;
     const x = Math.cos(a) * rad, z = Math.sin(a) * rad;
@@ -1662,6 +1845,10 @@ function scatterProps(isl) {
     if (h < 1.8 || h > spec.peak * 0.92) continue;
     const n = isl.normalLocal(x, z);
     if (n[1] < 0.80) continue;
+    if (isl.paths.length && pathDistance(isl, x, z) < 8) continue;
+    // forests clump instead of spreading evenly
+    const dens = isl.nz.fbm(x * 0.006 + 41, z * 0.006 + 41, 3) * 0.5 + 0.5;
+    if (r() > 0.18 + dens * 1.25) continue;
     makeTree(isl, b.trees[(r() * b.trees.length) | 0], x, z, r);
   }
   const rockCount = Math.floor(90 * (R / 320));
@@ -1671,6 +1858,7 @@ function scatterProps(isl) {
     const h = isl.heightLocal(x, z);
     if (h < -1.5) continue;
     if (spec.town && dist(x, z, spec.town.x, spec.town.z) < spec.town.r * 0.9) continue;
+    if (isl.paths.length && h > 1 && pathDistance(isl, x, z) < 7) continue;
     const s = 1.2 + r() * 4.5;
     addProp(isl, 'rock', x, h - s * 0.28, z, r() * TAU, s, b.rock, { sq: 0.6 + r() * 0.8 });
     if (s > 2.6) addCollider(isl, x, z, s * 0.55, s);
@@ -1692,24 +1880,7 @@ function scatterProps(isl) {
     } else if (style === 'lighthouse') {
       buildCape(isl, t, r);
     } else {
-      const ringR = t.r * 0.62;
-      for (let i = 0; i < t.houses; i++) {
-        const a = (i / t.houses) * TAU + r() * 0.28;
-        const rad = ringR * (0.55 + r() * 0.75);
-        const x = t.x + Math.cos(a) * rad, z = t.z + Math.sin(a) * rad;
-        makeHouse(isl, x, z, -a + PI / 2 + (r() - .5) * .5, style, r, style === 'city' ? 1.25 : 1);
-      }
-      // plaza details
-      for (let i = 0; i < 16; i++) {
-        const a = r() * TAU, rad = t.r * (0.2 + r() * 0.85);
-        const x = t.x + Math.cos(a) * rad, z = t.z + Math.sin(a) * rad;
-        const y = isl.heightLocal(x, z);
-        if (y < 1.2) continue;
-        const k = r();
-        if (k < .4) addProp(isl, 'barrel', x, y, z, r() * TAU, 0.9 + r() * 0.4, [0.45, 0.31, 0.19], {});
-        else if (k < .7) addProp(isl, 'crate', x, y, z, r() * TAU, 0.9 + r() * 0.5, [0.60, 0.44, 0.26], {});
-        else addProp(isl, 'lamp', x, y, z, 0, 1, [0.25, 0.24, 0.22], {});
-      }
+      buildStreet(isl, t, style, r);
       if (style === 'village') {
         addProp(isl, 'windmill', t.x + t.r * 0.75, isl.heightLocal(t.x + t.r * 0.75, t.z - t.r * 0.4), t.z - t.r * 0.4, 0.6, 1.6, [0.94, 0.90, 0.80], {});
         addCollider(isl, t.x + t.r * 0.75, t.z - t.r * 0.4, 5, 22);
@@ -1721,18 +1892,95 @@ function scatterProps(isl) {
     }
   }
 
-  /* dock */
+  /* dock: a real walkway you can run out to your boat on */
+  isl.platforms = isl.platforms || [];
   if (spec.dock) {
     const d = spec.dock;
     const ang = Math.atan2(d.z, d.x);
-    const startR = isl.coastR - 8;
-    for (let i = 0; i < 12; i++) {
-      const rad = startR + i * 5.5;
-      const x = Math.cos(ang) * rad, z = Math.sin(ang) * rad;
-      addProp(isl, 'plank', x, Math.max(0.9, isl.heightLocal(x, z) + 0.4), z, ang, 1, [0.42, 0.30, 0.18], {});
+    const dirX = Math.cos(ang), dirZ = Math.sin(ang);
+    const startR = isl.coastR - 14;
+    const planks = 13, step = 5.0;
+    const deckY = 1.35;
+    for (let i = 0; i < planks; i++) {
+      const rad = startR + i * step;
+      const x = dirX * rad, z = dirZ * rad;
+      addProp(isl, 'plank', x, Math.max(deckY, isl.heightLocal(x, z) + 0.5), z, ang, 1, [0.46, 0.32, 0.19], { i });
     }
-    isl.markers.dock = { x: Math.cos(ang) * (startR + 12 * 5.5), z: Math.sin(ang) * (startR + 12 * 5.5) };
-    isl.markers.landing = { x: Math.cos(ang) * (startR - 12), z: Math.sin(ang) * (startR - 12) };
+    const midR = startR + (planks - 1) * step / 2;
+    isl.platforms.push({
+      x: dirX * midR, z: dirZ * midR, y: deckY + 0.28,
+      hw: 3.4, hd: (planks - 1) * step / 2 + 3.0,
+      ry: Math.atan2(dirX, dirZ)      // heading of the walkway
+    });
+    const endR = startR + (planks - 1) * step;
+    isl.markers.dock = { x: dirX * (endR + 6.0), z: dirZ * (endR + 6.0) };
+    isl.markers.landing = { x: dirX * (startR - 10), z: dirZ * (startR - 10) };
+    isl.markers.pierEnd = { x: dirX * endR, z: dirZ * endR };
+  }
+}
+
+/* a town laid out along its road: houses face the street, then a plaza */
+function buildStreet(isl, t, style, r) {
+  const road = isl.paths[0];
+  const scale = style === 'city' ? 1.25 : 1;
+  let placed = 0;
+  if (road && road.length > 6) {
+    const from = Math.floor(road.length * 0.45);
+    for (let i = from; i < road.length - 1 && placed < t.houses; i++) {
+      const a = road[i], b = road[i + 1];
+      const dx = b.x - a.x, dz = b.z - a.z;
+      const dl = Math.hypot(dx, dz) || 1;
+      const nx = -dz / dl, nz = dx / dl;                       // street normal
+      for (const side of [-1, 1]) {
+        if (placed >= t.houses) break;
+        if (r() < 0.28) continue;                              // gaps make it read as a street
+        const off = 11 + r() * 5;
+        const x = a.x + nx * side * off, z = a.z + nz * side * off;
+        if (isl.heightLocal(x, z) < 1.6) continue;
+        makeHouse(isl, x, z, Math.atan2(-nx * side, -nz * side), style, r, scale);
+        placed++;
+        if (r() < 0.5) {
+          const fx = a.x + nx * side * (off - 6.5), fz = a.z + nz * side * (off - 6.5);
+          addProp(isl, 'fence', fx, isl.heightLocal(fx, fz), fz, Math.atan2(dx, dz), 1, [0.52, 0.40, 0.26], {});
+        }
+      }
+    }
+  }
+  // whatever is left forms a plaza around the town centre
+  const ringR = t.r * 0.55;
+  for (let i = placed; i < t.houses; i++) {
+    const a = (i / Math.max(t.houses, 1)) * TAU + r() * 0.4;
+    const rad = ringR * (0.75 + r() * 0.5);
+    const x = t.x + Math.cos(a) * rad, z = t.z + Math.sin(a) * rad;
+    if (isl.heightLocal(x, z) < 1.4) continue;
+    makeHouse(isl, x, z, Math.atan2(t.x - x, t.z - z), style, r, scale);
+  }
+  // the well at the heart of the plaza
+  const wy = isl.heightLocal(t.x, t.z);
+  if (wy > 1) {
+    addProp(isl, 'well', t.x, wy, t.z, r() * TAU, 1, [0.62, 0.60, 0.56], {});
+    addCollider(isl, t.x, t.z, 2.4, 3);
+  }
+  // market stalls, lamps, crates along the road and plaza
+  for (let i = 0; i < 22; i++) {
+    let x, z;
+    if (road && r() < 0.6) {
+      const p2 = road[Math.floor(road.length * (0.5 + r() * 0.49))];
+      const ang = r() * TAU, off = 7 + r() * 4;
+      x = p2.x + Math.cos(ang) * off; z = p2.z + Math.sin(ang) * off;
+    } else {
+      const a = r() * TAU, rad = t.r * (0.2 + r() * 0.8);
+      x = t.x + Math.cos(a) * rad; z = t.z + Math.sin(a) * rad;
+    }
+    const y = isl.heightLocal(x, z);
+    if (y < 1.2) continue;
+    const k = r();
+    if (k < .30) addProp(isl, 'barrel', x, y, z, r() * TAU, 0.9 + r() * 0.4, [0.45, 0.31, 0.19], {});
+    else if (k < .52) addProp(isl, 'crate', x, y, z, r() * TAU, 0.9 + r() * 0.5, [0.60, 0.44, 0.26], {});
+    else if (k < .74) addProp(isl, 'lamp', x, y, z, 0, 1, [0.25, 0.24, 0.22], {});
+    else if (k < .90) addProp(isl, 'stall', x, y, z, r() * TAU, 1, [0.58, 0.42, 0.26],
+      { awning: [[0.82, 0.28, 0.24], [0.30, 0.46, 0.70], [0.86, 0.72, 0.30]][(r() * 3) | 0] });
+    else addProp(isl, 'signpost', x, y, z, r() * TAU, 1, [0.50, 0.38, 0.24], {});
   }
 }
 
@@ -1924,6 +2172,41 @@ function drawProp(p, isl, lod) {
       part(m, 'box', w * .28, hh * .62, d / 2 + .06, 1.5, 1.5, .2, [0.55, 0.72, 0.80], 1, 0.06);
       break;
     }
+    case 'fence': {
+      const m = nodeM(_stack[0], M4.id(), x, y, z, 0, p.ry, 0, 1, 1, 1);
+      for (let i = -1; i <= 1; i++) part(m, 'cyl', 0, 1.0, i * 3.0, 0.34, 2.0, 0.34, c);
+      part(m, 'box', 0, 1.45, 0, 0.16, 0.22, 6.2, [c[0] * 1.1, c[1] * 1.1, c[2] * 1.1]);
+      part(m, 'box', 0, 0.75, 0, 0.16, 0.22, 6.2, [c[0] * 1.1, c[1] * 1.1, c[2] * 1.1]);
+      break;
+    }
+    case 'well': {
+      const m = nodeM(_stack[0], M4.id(), x, y, z, 0, p.ry, 0, 1, 1, 1);
+      part(m, 'cyl', 0, 0.9, 0, 4.4, 1.8, 4.4, c);
+      part(m, 'torus', 0, 1.85, 0, 4.9, 0.9, 4.9, [c[0] * 0.85, c[1] * 0.85, c[2] * 0.85]);
+      part(m, 'cyl', 0, 0.95, 0, 3.6, 1.9, 3.6, [0.10, 0.22, 0.28]);
+      for (const side of [-1, 1]) part(m, 'box', side * 2.0, 3.4, 0, 0.4, 4.0, 0.4, [0.45, 0.33, 0.20]);
+      partR(m, 'pyr', 0, 5.9, 0, 0, PI / 4, 0, 6.4, 1.8, 6.4, [0.62, 0.28, 0.24]);
+      part(m, 'cyl', 0, 5.0, 0, 0.3, 4.4, 0.3, [0.40, 0.30, 0.18]);
+      part(m, 'box', 0, 4.0, 0, 1.2, 1.2, 1.2, [0.42, 0.30, 0.18]);
+      break;
+    }
+    case 'stall': {
+      const m = nodeM(_stack[0], M4.id(), x, y, z, 0, p.ry, 0, 1, 1, 1);
+      for (const [ox, oz] of [[-2.4, -1.4], [2.4, -1.4], [-2.4, 1.4], [2.4, 1.4]])
+        part(m, 'cyl', ox, 1.6, oz, 0.26, 3.2, 0.26, c);
+      part(m, 'box', 0, 1.9, 0, 5.6, 0.25, 3.4, [c[0] * 1.2, c[1] * 1.2, c[2] * 1.2]);
+      partR(m, 'box', 0, 3.4, 0, 0.22, 0, 0, 6.2, 0.2, 4.0, p.awning || [0.82, 0.28, 0.24]);
+      for (let i = 0; i < 4; i++) part(m, 'ball', -1.8 + i * 1.2, 2.3, 0, 0.7, 0.6, 0.7,
+        [[0.86, 0.42, 0.20], [0.90, 0.76, 0.30], [0.62, 0.24, 0.24], [0.40, 0.62, 0.30]][i]);
+      break;
+    }
+    case 'signpost': {
+      const m = nodeM(_stack[0], M4.id(), x, y, z, 0, p.ry, 0, 1, 1, 1);
+      part(m, 'cyl', 0, 2.0, 0, 0.34, 4.0, 0.34, c);
+      partR(m, 'box', 1.2, 3.4, 0, 0, 0, 0.06, 3.4, 0.9, 0.2, [0.70, 0.56, 0.34]);
+      partR(m, 'box', -1.1, 2.6, 0, 0, 0, -0.05, 3.0, 0.8, 0.2, [0.66, 0.52, 0.32]);
+      break;
+    }
     case 'barrel':
       drawShape('cyl', x, y + 1.0 * p.sc, z, 0, p.ry, 0, 1.5 * p.sc, 2.0 * p.sc, 1.5 * p.sc, c);
       drawShape('cyl', x, y + 1.0 * p.sc, z, 0, p.ry, 0, 1.58 * p.sc, 0.35 * p.sc, 1.58 * p.sc, [0.30, 0.22, 0.14]);
@@ -1936,10 +2219,19 @@ function drawProp(p, isl, lod) {
       drawShape('lowsphere', x, y + 4.7, z, 0, 0, 0, 1.0, 1.2, 1.0, [1.0, 0.86, 0.55], 1, world.night * 3.2);
       if (world.night > 0.15) pushSprite(x, y + 4.7, z, 3.4, 1.0, 0.86, 0.52, 0.30 * world.night, 0, 0, 0, 0);
       break;
-    case 'plank':
-      drawShape('box', x, y, z, 0, p.ry, 0, 7, .5, 5.2, c);
-      drawShape('cyl', x, y - 2.5, z, 0, 0, 0, .5, 5, .5, [0.34, 0.24, 0.14]);
+    case 'plank': {
+      const hd = Math.atan2(Math.cos(p.ry), Math.sin(p.ry));   // walkway heading
+      drawShape('box', x, y, z, 0, hd, 0, 6.6, .55, 5.4, c);
+      for (const side of [-1, 1]) {
+        const px = x + Math.cos(hd) * side * 3.1, pz = z - Math.sin(hd) * side * 3.1;
+        drawShape('cyl', px, y - 2.6, pz, 0, 0, 0, .55, 5.6, .55, [0.34, 0.24, 0.14]);
+        if (p.i !== undefined && p.i % 2 === 0) {
+          drawShape('cyl', px, y + 1.0, pz, 0, 0, 0, .30, 1.9, .30, [0.40, 0.28, 0.16]);
+          drawShape('box', px, y + 1.9, pz, 0, hd, 0, .22, .22, 5.2, [0.44, 0.31, 0.18]);
+        }
+      }
       break;
+    }
     case 'windmill': {
       const m = nodeM(_stack[0], M4.id(), x, y, z, 0, p.ry, 0, 1, 1, 1);
       part(m, 'cyl', 0, 9, 0, 9, 18, 9, c);
@@ -2052,237 +2344,276 @@ function drawHumanoid(o) {
   M4.copy(_dRoot, root); M4.copy(_dHip, hip);
 
   const thigh = 0.46, shin = 0.44, upper = 0.40, fore = 0.38;
-  const build = C.build || 1;            // 1 = normal, >1 = heavy, <1 = slight
+  const build = C.build || 1;
+  const skin = C.skin, sleeve = C.sleeve || C.skin;
 
-  /* ---------------- legs ---------------- */
+  /* ---------------- pelvis + legs ---------------- */
+  part(hip, 'ball', 0, -0.05, 0, 0.42 * build, 0.30, 0.31 * build, C.pants);
   for (const side of [-1, 1]) {
     const L = side < 0 ? P.legL : P.legR;
-    const legRoot = nodeM(_stack[2], hip, side * 0.135 * build, -0.04, 0, L.x, L.y || 0, L.z || 0, 1, 1, 1);
-    part(legRoot, 'cyl', 0, -thigh / 2, 0, 0.175 * build, thigh, 0.175 * build, C.pants);
+    const legRoot = nodeM(_stack[2], hip, side * 0.125 * build, -0.05, 0, L.x, L.y || 0, L.z || 0, 1, 1, 1);
+    part(legRoot, 'ball', 0, -0.02, 0, 0.215 * build, 0.20, 0.215 * build, C.pants);
+    part(legRoot, 'limb', 0, -thigh / 2 + 0.02, 0, 0.215 * build, thigh + 0.05, 0.215 * build, C.pants);
     const knee = nodeM(_stack[3], legRoot, 0, -thigh, 0, L.k, 0, 0, 1, 1, 1);
-    part(knee, 'lowsphere', 0, 0, 0, 0.165 * build, 0.16, 0.165 * build, C.pants);
-    part(knee, 'cyl', 0, -shin / 2, 0, 0.145 * build, shin, 0.145 * build, C.pants2 || C.pants);
-    if (C.cuff) part(knee, 'cyl', 0, -shin + 0.06, 0, 0.20 * build, 0.10, 0.20 * build, C.cuff);
-    if (C.sandals) {
-      part(knee, 'box', 0, -shin - 0.035, 0.045, 0.18, 0.05, 0.30, [0.84, 0.70, 0.44]);
-      partR(knee, 'box', 0, -shin + 0.03, 0.06, 0.5, 0, 0, 0.13, 0.035, 0.14, [0.55, 0.40, 0.24]);
-    } else {
-      part(knee, 'box', 0, -shin - 0.045, 0.045, 0.175, 0.11, 0.30, C.shoe || [0.25, 0.18, 0.12]);
-    }
+    part(knee, 'ball', 0, 0.005, 0, 0.168 * build, 0.16, 0.168 * build, C.pants);
+    part(knee, 'limb', 0, -shin / 2 + 0.02, 0, 0.168 * build, shin + 0.05, 0.168 * build, C.pants2 || C.pants);
+    if (C.cuff) part(knee, 'limb2', 0, -shin + 0.08, 0, 0.19 * build, 0.13, 0.19 * build, C.cuff);
+    const ankle = nodeM(_stack[4], knee, 0, -shin, 0, L.f || 0, 0, 0, 1, 1, 1);
+    const footCol = C.sandals ? [0.84, 0.70, 0.44] : (C.shoe || [0.25, 0.18, 0.12]);
+    part(ankle, 'ball', 0, 0.015, 0, 0.128, 0.13, 0.128, C.sandals ? skin : footCol);
+    part(ankle, 'ball', 0, -0.045, 0.045, 0.16, 0.085, 0.26, footCol);
+    part(ankle, 'ball', 0, -0.05, 0.145, 0.135, 0.065, 0.10, footCol);
+    if (C.sandals) partR(ankle, 'box', 0, 0.025, 0.045, 0.5, 0, 0, 0.115, 0.032, 0.09, [0.55, 0.40, 0.24]);
   }
 
   /* ---------------- torso ---------------- */
   const torso = nodeM(_stack[2], hip, 0, 0, 0, P.torsoX || 0, P.torsoY || 0, P.torsoZ || 0, 1, 1, 1);
   M4.copy(_dTorso, torso);
-  part(torso, 'box', 0, 0.36, 0, 0.44 * build, 0.42, 0.25 * build, C.shirt);          // chest
-  part(torso, 'lowsphere', 0, 0.545, 0, 0.46 * build, 0.20, 0.27 * build, C.shirt);   // shoulder line
-  part(torso, 'box', 0, 0.10, 0, 0.37 * build, 0.28, 0.23 * build, C.shirt);          // waist (tapered)
-  part(torso, 'box', 0, -0.03, 0, 0.39 * build, 0.10, 0.24 * build, C.belt || [0.3, 0.24, 0.16]);
-  if (C.open) part(torso, 'box', 0, 0.36, 0.12 * build, 0.13, 0.38, 0.045, C.skin);   // bare chest between lapels
+  part(torso, 'ball', 0, 0.34, 0, 0.47 * build, 0.54, 0.30 * build, C.shirt);        // ribcage
+  part(torso, 'ball', 0, 0.10, 0, 0.385 * build, 0.36, 0.26 * build, C.shirt);       // waist
+  part(torso, 'ball', 0, 0.525, 0, 0.545 * build, 0.30, 0.31 * build, C.shirt);      // shoulder yoke
+  part(torso, 'limb2', 0, -0.01, 0, 0.40 * build, 0.12, 0.27 * build, C.belt || [0.3, 0.24, 0.16]);
+  if (C.open) {
+    part(torso, 'box', 0, 0.36, 0.135 * build, 0.14, 0.40, 0.03, skin);
+    part(torso, 'ball', 0, 0.47, 0.10 * build, 0.19, 0.10, 0.10, skin);              // collarbone hollow
+  }
   if (C.cape) {
-    partR(torso, 'box', 0, 0.20, -0.18, P.capeX || 0.1, 0, 0, 0.62 * build, 0.82, 0.06, C.cape);
-    part(torso, 'box', 0, 0.56, -0.06, 0.66 * build, 0.10, 0.24, C.capeCollar || C.cape);
+    partR(torso, 'box', 0, 0.20, -0.185, (P.capeX || 0.1) + (P.capeFlap || 0), 0, 0, 0.60 * build, 0.84, 0.05, C.cape);
+    part(torso, 'limb2', 0, 0.575, -0.02, 0.62 * build, 0.14, 0.34, C.capeCollar || C.cape);
   }
   if (C.shoulderPads) for (const side of [-1, 1])
-    part(torso, 'lowsphere', side * 0.27 * build, 0.55, 0, 0.24, 0.16, 0.24, C.shoulderPads);
+    part(torso, 'ball', side * 0.28 * build, 0.55, 0, 0.26, 0.20, 0.26, C.shoulderPads);
 
   /* ---------------- arms ---------------- */
   for (const side of [-1, 1]) {
     const A = side < 0 ? P.armL : P.armR;
     const st = A.stretch || 0;
-    const sh = nodeM(_stack[3], torso, side * 0.255 * build, 0.50, 0, A.x, A.y || 0, A.z || 0, 1, 1, 1);
+    const sh = nodeM(_stack[3], torso, side * 0.245 * build, 0.495, 0, A.x, A.y || 0, A.z || 0, 1, 1, 1);
     M4.copy(side < 0 ? _dArmL : _dArmR, sh);
-    part(sh, 'lowsphere', 0, 0.0, 0, 0.17 * build, 0.17, 0.17 * build, C.sleeve || C.skin);
+    part(sh, 'ball', 0, -0.01, 0, 0.175 * build, 0.175, 0.175 * build, sleeve);
     const ul = upper * (1 + st * 1.2);
-    part(sh, 'cyl', 0, -ul / 2, 0, 0.125 * build, ul, 0.125 * build, C.sleeve || C.skin);
-    if (C.sleeve && !st) part(sh, 'cyl', 0, -ul + 0.03, 0, 0.135 * build, 0.08, 0.135 * build, C.cuff || C.sleeve);
+    part(sh, 'limb', 0, -ul / 2 + 0.02, 0, 0.172 * build, ul + 0.05, 0.172 * build, sleeve);
+    if (C.sleeve) part(sh, 'limb2', 0, -ul + 0.06, 0, 0.185 * build, 0.10, 0.185 * build, C.cuff || C.sleeve);
     const el = nodeM(_stack[4], sh, 0, -ul, 0, A.k || 0, 0, 0, 1, 1, 1);
-    part(el, 'lowsphere', 0, 0, 0, 0.125, 0.125, 0.125, C.sleeve || C.skin);
+    part(el, 'ball', 0, 0.005, 0, 0.132, 0.132, 0.132, skin);
     const fl = fore * (1 + st * 2.6);
-    part(el, 'cyl', 0, -fl / 2, 0, 0.112, fl, 0.112, C.skin);
-    const hand = nodeM(_stack[5], el, 0, -fl - 0.05, 0, 0, 0, 0, 1, 1, 1);
+    part(el, 'limb', 0, -fl / 2 + 0.02, 0, 0.132, fl + 0.05, 0.132, skin);
+    const hand = nodeM(_stack[5], el, 0, -fl - 0.035, 0, A.w || 0, 0, 0, 1, 1, 1);
     M4.copy(side < 0 ? _dHandL : _dHandR, hand);
-    const fistK = 0.145 * (1 + (A.fist || 0) * 0.45);
-    if (!(C.axeHand && side > 0)) part(hand, 'lowsphere', 0, 0, 0, fistK, fistK, fistK, C.glove || C.skin);
+    const fist = A.fist || 0;
+    if (!(C.axeHand && side > 0)) {
+      const gcol = C.glove || skin;
+      part(hand, 'ball', 0, -0.03, 0, 0.135 * (1 + fist * 0.28), 0.15, 0.115 * (1 + fist * 0.3), gcol);
+      part(hand, 'ball', side * 0.085, -0.02, 0.02, 0.06, 0.075, 0.06, gcol);      // thumb
+      if (fist > 0.2) part(hand, 'ball', 0, -0.10, 0.045, 0.115, 0.055, 0.06, gcol);  // knuckles
+    }
     const showWeapon = !o.sheathed || o.attacking;
     if (showWeapon && o.weapon && ((side > 0 && o.weaponHand !== 'L') || (side < 0 && o.weaponHand === 'L'))) drawWeapon(hand, o.weapon, C);
     if (showWeapon && o.weapon2 && side < 0) drawWeapon(hand, o.weapon2, C);
   }
 
   /* ---------------- head ---------------- */
-  const neck = nodeM(_stack[3], torso, 0, 0.62, 0, P.headX || 0, P.headY || 0, 0, 1, 1, 1);
+  const neck = nodeM(_stack[3], torso, 0, 0.62, 0, P.headX || 0, P.headY || 0, P.headZ || 0, 1, 1, 1);
   M4.copy(_dNeck, neck);
-  part(neck, 'cyl', 0, -0.02, 0, 0.115, 0.10, 0.115, C.skin);                           // neck
-  part(neck, 'lowsphere', 0, 0.21, 0, 0.44, 0.47, 0.42, C.skin);                        // head
-  part(neck, 'lowsphere', 0, 0.115, 0.02, 0.345, 0.26, 0.36, C.skin);                   // rounded jaw
+  part(neck, 'limb', 0, -0.02, 0, 0.125, 0.13, 0.125, skin);
+  part(neck, 'ball', 0, 0.215, -0.015, 0.455, 0.48, 0.445, skin);                  // cranium
+  part(neck, 'ball', 0, 0.125, 0.03, 0.375, 0.30, 0.40, skin);                     // jaw + cheeks
+  for (const side of [-1, 1]) part(neck, 'ball', side * 0.22, 0.19, -0.02, 0.07, 0.135, 0.10, skin);   // ears
 
-  /* face */
-  const eyeY = 0.225, browCol = C.brow || C.hair || [0.12, 0.10, 0.10];
+  /* ---------------- face ---------------- */
+  const eyeY = 0.225, eyeZ = 0.185;
+  const blink = P.blink || 0;
+  const browCol = C.brow || C.hair || [0.12, 0.10, 0.10];
   for (const side of [-1, 1]) {
-    const hidden = C.hairOverEye === side;
-    if (hidden) continue;
-    part(neck, 'lowsphere', side * 0.125, eyeY, 0.200, 0.072, 0.092, 0.045, [1, 1, 1]);
-    part(neck, 'lowsphere', side * 0.128, eyeY - 0.004, 0.218, 0.042, 0.060, 0.030, C.eye || [0.1, 0.08, 0.08]);
-
+    if (C.hairOverEye === side) continue;
+    const open = 1 - blink;
+    part(neck, 'ball', side * 0.118, eyeY, eyeZ, 0.098, 0.115 * Math.max(open, 0.08), 0.075, [1, 1, 1]);
+    if (open > 0.25) {
+      const gx = (P.gazeX || 0) * 0.02, gy = (P.gazeY || 0) * 0.015;
+      part(neck, 'ball', side * 0.118 + gx, eyeY + gy, eyeZ + 0.04, 0.055, 0.062 * open, 0.045, C.eye || [0.14, 0.11, 0.10]);
+      part(neck, 'ball', side * 0.118 + gx, eyeY + gy, eyeZ + 0.055, 0.030, 0.034 * open, 0.03, [0.05, 0.04, 0.05]);
+      part(neck, 'ball', side * 0.118 + gx - 0.018, eyeY + gy + 0.022, eyeZ + 0.062, 0.016, 0.018 * open, 0.014, [1, 1, 1], 1, 0.35);
+    }
+    if (blink > 0.15) part(neck, 'ball', side * 0.118, eyeY + 0.035 * blink, eyeZ + 0.02, 0.10, 0.05 * blink, 0.07, skin);
     if (C.brows !== false) {
-      const angry = C.angry ? side * 0.5 : 0;
-      partR(neck, 'box', side * 0.125, eyeY + 0.098, 0.202, 0, 0, angry, 0.078, 0.020, 0.022, browCol);
+      const angry = (C.angry ? side * 0.5 : 0) + (P.browAngry || 0) * side * 0.5;
+      const lift = (P.browLift || 0) * 0.02;
+      partR(neck, 'box', side * 0.125, eyeY + 0.10 + lift, eyeZ + 0.015, 0, 0, angry, 0.085, 0.022, 0.026, browCol);
     }
   }
-  if (C.swirlBrow) {   // Sanji's curled eyebrow
-    partR(neck, 'box', -0.12, eyeY + 0.085, 0.205, 0, 0, 0.45, 0.115, 0.024, 0.025, C.hair);
-    partR(neck, 'box', -0.175, eyeY + 0.045, 0.203, 0, 0, 1.5, 0.065, 0.022, 0.025, C.hair);
+  if (C.swirlBrow) {
+    partR(neck, 'box', -0.125, eyeY + 0.095, eyeZ + 0.015, 0, 0, 0.45, 0.115, 0.024, 0.026, C.hair);
+    partR(neck, 'box', -0.18, eyeY + 0.055, eyeZ + 0.01, 0, 0, 1.5, 0.065, 0.022, 0.026, C.hair);
   }
   const mouth = C.mouth || 'flat';
+  const open = P.mouthOpen || 0;
   if (mouth === 'grin') {
-    part(neck, 'box', 0, 0.075, 0.207, 0.155, 0.048, 0.025, [0.36, 0.14, 0.14]);
-    part(neck, 'box', 0, 0.090, 0.213, 0.135, 0.018, 0.02, [1, 1, 1]);
-    partR(neck, 'box', -0.088, 0.086, 0.202, 0, 0, 0.6, 0.045, 0.026, 0.025, [0.36, 0.14, 0.14]);
-    partR(neck, 'box', 0.088, 0.086, 0.202, 0, 0, -0.6, 0.045, 0.026, 0.025, [0.36, 0.14, 0.14]);
+    part(neck, 'ball', 0, 0.082 - open * 0.02, 0.196, 0.145, 0.042 + open * 0.10, 0.045, [0.36, 0.14, 0.14]);
+    part(neck, 'box', 0, 0.094, 0.201, 0.122, 0.014, 0.028, [1, 1, 1]);
+    for (const side of [-1, 1]) part(neck, 'ball', side * 0.072, 0.098, 0.188, 0.028, 0.022, 0.035, [0.36, 0.14, 0.14]);
   } else if (mouth === 'fangs') {
-    part(neck, 'box', 0, 0.085, 0.205, 0.19, 0.05, 0.025, [0.30, 0.12, 0.12]);
-    for (let i = -2; i <= 2; i++) partR(neck, 'cone', i * 0.04, 0.080, 0.212, PI, 0, 0, 0.030, 0.055, 0.030, [1, 1, 1]);
+    part(neck, 'ball', 0, 0.078, 0.19, 0.20, 0.055 + open * 0.08, 0.05, [0.28, 0.10, 0.10]);
+    for (let i = -2; i <= 2; i++) partR(neck, 'cone', i * 0.042, 0.072, 0.20, PI, 0, 0, 0.032, 0.06, 0.032, [1, 1, 1]);
   } else if (mouth === 'frown') {
-    part(neck, 'box', 0, 0.088, 0.205, 0.10, 0.024, 0.025, [0.40, 0.18, 0.16]);
-    partR(neck, 'box', -0.058, 0.098, 0.202, 0, 0, 0.55, 0.04, 0.022, 0.025, [0.40, 0.18, 0.16]);
-    partR(neck, 'box', 0.058, 0.098, 0.202, 0, 0, -0.55, 0.04, 0.022, 0.025, [0.40, 0.18, 0.16]);
+    part(neck, 'ball', 0, 0.088, 0.192, 0.105, 0.026, 0.04, [0.38, 0.17, 0.15]);
+    for (const side of [-1, 1]) partR(neck, 'ball', side * 0.058, 0.078, 0.188, 0, 0, side * 0.6, 0.04, 0.022, 0.035, [0.38, 0.17, 0.15]);
   } else {
-    part(neck, 'box', 0, 0.092, 0.205, 0.085, 0.024, 0.025, [0.44, 0.20, 0.18]);
+    part(neck, 'ball', 0, 0.092, 0.192, 0.09, 0.024 + open * 0.06, 0.035, [0.42, 0.19, 0.17]);
   }
   if (C.scar) {
-    part(neck, 'box', -0.128, 0.150, 0.200, 0.024, 0.062, 0.025, [0.80, 0.38, 0.32]);
-    part(neck, 'box', -0.128, 0.113, 0.200, 0.024, 0.038, 0.025, [0.80, 0.38, 0.32]);
+    part(neck, 'box', -0.135, 0.152, eyeZ + 0.01, 0.022, 0.062, 0.03, [0.80, 0.38, 0.32]);
+    part(neck, 'box', -0.135, 0.115, eyeZ + 0.01, 0.022, 0.038, 0.03, [0.80, 0.38, 0.32]);
   }
+  if (C.blush) for (const side of [-1, 1])
+    part(neck, 'ball', side * 0.185, 0.155, 0.145, 0.075, 0.045, 0.05, [0.94, 0.55, 0.50], 0.55);
 
-  /* hair */
+  /* ---------------- hair ---------------- */
+  const hs = P.hairSway || 0, hz = P.hairSwayZ || 0;
   switch (C.hairStyle) {
     case 'spiky':
-      part(neck, 'lowsphere', 0, 0.30, -0.02, 0.465, 0.36, 0.445, C.hair);
-      for (let i = 0; i < 5; i++) {
-        const a = (i / 5) * PI * 1.6 - PI * 0.3;
-        partR(neck, 'cone', Math.cos(a) * 0.19, 0.46, Math.sin(a) * 0.17 - 0.04, 0.4, a, 0, 0.16, 0.26, 0.16, C.hair);
+      part(neck, 'ball', 0, 0.275, -0.03, 0.47, 0.40, 0.455, C.hair);
+      for (let i = 0; i < 7; i++) {
+        const a = (i / 7) * PI * 1.7 - PI * 0.35;
+        partR(neck, 'cone', Math.cos(a) * 0.185 + hs * 0.5, 0.455, Math.sin(a) * 0.17 - 0.04 + hz * 0.5,
+          0.35 + hz, a, hs * 2.0, 0.13, 0.26, 0.13, C.hair);
       }
       break;
-    case 'threeSpike':   // Zoro
-      part(neck, 'lowsphere', 0, 0.31, -0.01, 0.46, 0.34, 0.445, C.hair);
+    case 'threeSpike':
+      part(neck, 'ball', 0, 0.28, -0.02, 0.465, 0.40, 0.45, C.hair);
       for (let i = -1; i <= 1; i++)
-        partR(neck, 'cone', i * 0.16, 0.47, -0.03, -0.22, 0, i * 0.32, 0.15, 0.26, 0.15, C.hair);
+        partR(neck, 'cone', i * 0.155 + hs * 0.6, 0.47, -0.03 + hz * 0.6, -0.20 + hz * 1.4, 0, i * 0.32 + hs * 2.2, 0.145, 0.27, 0.145, C.hair);
+      part(neck, 'ball', 0, 0.15, -0.19, 0.40, 0.30, 0.22, C.hair);
       break;
     case 'long':
-      part(neck, 'lowsphere', 0, 0.30, -0.01, 0.47, 0.37, 0.46, C.hair);
-      part(neck, 'lowsphere', 0, 0.06, -0.16, 0.44, 0.56, 0.34, C.hair);
-      part(neck, 'lowsphere', -0.245, 0.10, -0.03, 0.17, 0.52, 0.34, C.hair);
-      part(neck, 'lowsphere', 0.245, 0.10, -0.03, 0.17, 0.52, 0.34, C.hair);
-      partR(neck, 'box', -0.15, 0.375, 0.16, 0, 0, 0.45, 0.24, 0.09, 0.22, C.hair);
+      part(neck, 'ball', 0, 0.275, -0.02, 0.475, 0.40, 0.465, C.hair);
+      part(neck, 'ball', 0, 0.03, -0.16 + hz * 0.5, 0.44, 0.62, 0.34, C.hair);
+      for (const side of [-1, 1]) part(neck, 'ball', side * (0.235 + hs * side * 0.1), 0.09, 0.0, 0.16, 0.54, 0.30, C.hair);
+      partR(neck, 'ball', -0.15, 0.375, 0.155, 0, 0, 0.4, 0.22, 0.10, 0.20, C.hair);
       break;
-    case 'curly':        // Usopp
-      part(neck, 'lowsphere', 0, 0.28, -0.03, 0.45, 0.32, 0.44, C.hair);
-      for (let i = 0; i < 5; i++) {
-        const a = i / 5 * TAU;
-        part(neck, 'lowsphere', Math.cos(a) * 0.17, 0.14 + Math.sin(a) * 0.07, -0.30, 0.19, 0.19, 0.19, C.hair);
+    case 'curly':
+      part(neck, 'ball', 0, 0.26, -0.04, 0.455, 0.36, 0.45, C.hair);
+      for (let i = 0; i < 6; i++) {
+        const a = i / 6 * TAU;
+        part(neck, 'ball', Math.cos(a) * 0.185 + hs, 0.13 + Math.sin(a) * 0.085, -0.30 + hz, 0.20, 0.20, 0.20, C.hair);
       }
       break;
-    case 'swoop':        // Sanji
-      part(neck, 'lowsphere', 0, 0.31, -0.01, 0.465, 0.35, 0.455, C.hair);
-      partR(neck, 'box', -0.16, 0.26, 0.19, 0, 0, 0.22, 0.24, 0.38, 0.14, C.hair);
-      part(neck, 'box', 0.09, 0.43, 0.12, 0.38, 0.11, 0.32, C.hair);
+    case 'swoop':
+      part(neck, 'ball', 0, 0.29, -0.02, 0.47, 0.40, 0.46, C.hair);
+      partR(neck, 'ball', -0.135, 0.255, 0.175, 0.15, 0, 0.30, 0.24, 0.34, 0.20, C.hair);
+      partR(neck, 'ball', -0.185, 0.145, 0.145, 0.10, 0, 0.55, 0.15, 0.22, 0.16, C.hair);
+      partR(neck, 'ball', 0.10, 0.395, 0.115, -0.25, 0, -0.12, 0.34, 0.17, 0.30, C.hair);
       break;
     case 'bald': break;
     default:
-      part(neck, 'lowsphere', 0, 0.29, -0.01, 0.465, 0.34, 0.455, C.hair);
+      part(neck, 'ball', 0, 0.265, -0.02, 0.47, 0.39, 0.46, C.hair);
+      partR(neck, 'ball', 0, 0.335, 0.145, 0.3, 0, 0, 0.36, 0.14, 0.20, C.hair);
   }
 
-  /* nose */
-  if (C.sawNose) {       // Arlong
-    partR(neck, 'cone', 0, 0.175, 0.40, PI / 2, 0, 0, 0.10, 0.56, 0.10, C.skin);
+  /* ---------------- nose ---------------- */
+  if (C.sawNose) {
+    partR(neck, 'cone', 0, 0.175, 0.40, PI / 2, 0, 0, 0.10, 0.58, 0.10, skin);
     for (let i = 0; i < 5; i++) partR(neck, 'cone', 0, 0.222, 0.24 + i * 0.095, 0, 0, PI, 0.05, 0.07, 0.05, [0.92, 0.94, 0.96]);
   } else if (C.longNose) {
-    partR(neck, 'cone', 0, 0.170, 0.42, PI / 2, 0, 0, 0.075, 0.58, 0.075, C.skin);
+    partR(neck, 'limb', 0, 0.168, 0.45, PI / 2, 0, 0, 0.085, 0.62, 0.085, skin);
+    part(neck, 'ball', 0, 0.168, 0.76, 0.055, 0.055, 0.055, skin);
   } else if (C.redNose) {
-    part(neck, 'lowsphere', 0, 0.165, 0.235, 0.10, 0.10, 0.10, [0.92, 0.20, 0.18], 1, 0.18);
+    part(neck, 'ball', 0, 0.165, 0.24, 0.115, 0.115, 0.115, [0.92, 0.20, 0.18], 1, 0.18);
   } else {
-    part(neck, 'lowsphere', 0, 0.165, 0.225, 0.055, 0.055, 0.075, C.skin);
+    part(neck, 'ball', 0, 0.168, 0.225, 0.062, 0.055, 0.085, skin);
   }
 
-  /* headwear */
+  /* ---------------- headwear ---------------- */
+  const hatT = nodeM(_stack[4], neck, hs * 0.35, 0.02, hz * 0.35 - (C.hatTilt || 0) * 0.10,
+    (hz * 0.55) - (C.hatTilt || 0), 0, -hs * 0.55, 1, 1, 1);
   switch (C.hat) {
     case 'straw':
-      part(neck, 'cyl', 0, 0.375, -0.02, 1.02, 0.042, 1.02, [0.93, 0.80, 0.44]);
-      part(neck, 'cyl', 0, 0.385, -0.02, 0.86, 0.05, 0.86, [0.86, 0.72, 0.38]);
-      part(neck, 'cyl', 0, 0.445, -0.02, 0.52, 0.20, 0.52, [0.96, 0.86, 0.50]);
-      part(neck, 'cyl', 0, 0.398, -0.02, 0.54, 0.07, 0.54, [0.72, 0.14, 0.12]);
-      part(neck, 'cyl', 0, 0.535, -0.02, 0.48, 0.05, 0.48, [0.90, 0.78, 0.42]);
+      part(hatT, 'torus', 0, 0.352, -0.03, 0.70, 0.30, 0.70, [0.89, 0.76, 0.41]);
+      part(hatT, 'limb2', 0, 0.352, -0.03, 0.65, 0.05, 0.65, [0.93, 0.81, 0.46]);
+      part(hatT, 'limb', 0, 0.418, -0.03, 0.50, 0.16, 0.50, [0.95, 0.85, 0.50]);
+      part(hatT, 'ball', 0, 0.488, -0.03, 0.44, 0.09, 0.44, [0.92, 0.82, 0.46]);
+      part(hatT, 'torus', 0, 0.376, -0.03, 0.55, 0.26, 0.55, [0.72, 0.14, 0.12]);
       break;
     case 'marine':
-      part(neck, 'cyl', 0, 0.465, 0, 0.60, 0.05, 0.60, [0.96, 0.96, 0.96]);
-      part(neck, 'cyl', 0, 0.515, 0, 0.55, 0.13, 0.55, [0.96, 0.96, 0.96]);
-      part(neck, 'box', 0, 0.455, 0.27, 0.44, 0.05, 0.26, [0.14, 0.22, 0.42]);
-      part(neck, 'cyl', 0, 0.468, 0, 0.555, 0.05, 0.555, [0.16, 0.32, 0.60]);
-      part(neck, 'lowsphere', 0, 0.585, 0, 0.14, 0.10, 0.14, [0.90, 0.72, 0.22]);
+      part(hatT, 'limb2', 0, 0.465, 0, 0.60, 0.05, 0.60, [0.96, 0.96, 0.96]);
+      part(hatT, 'limb', 0, 0.525, 0, 0.55, 0.14, 0.55, [0.97, 0.97, 0.97]);
+      part(hatT, 'ball', 0, 0.585, 0, 0.42, 0.10, 0.42, [0.97, 0.97, 0.97]);
+      part(hatT, 'ball', 0, 0.45, 0.27, 0.42, 0.05, 0.26, [0.14, 0.22, 0.42]);
+      part(hatT, 'torus', 0, 0.472, 0, 0.505, 0.30, 0.505, [0.16, 0.32, 0.60]);
+      part(hatT, 'ball', 0, 0.545, 0.16, 0.13, 0.09, 0.10, [0.90, 0.72, 0.22]);
       break;
     case 'bandana':
-      part(neck, 'cyl', 0, 0.375, 0, 0.90, 0.16, 0.90, C.bandanaColor || [0.16, 0.16, 0.18]);
-      partR(neck, 'box', -0.34, 0.33, -0.26, 0, 0.6, 0.4, 0.10, 0.36, 0.05, C.bandanaColor || [0.16, 0.16, 0.18]);
-      partR(neck, 'box', 0.34, 0.33, -0.26, 0, -0.6, -0.4, 0.10, 0.30, 0.05, C.bandanaColor || [0.16, 0.16, 0.18]);
+      part(hatT, 'ball', 0, 0.33, -0.015, 0.468, 0.26, 0.458, C.bandanaColor || [0.16, 0.16, 0.18]);
+      part(hatT, 'torus', 0, 0.285, -0.015, 0.50, 0.26, 0.49, C.bandanaColor || [0.16, 0.16, 0.18]);
+      partR(hatT, 'ball', -0.19, 0.27, -0.20, 0, 0.5, 0, 0.16, 0.13, 0.13, C.bandanaColor || [0.16, 0.16, 0.18]);
+      for (const side of [-1, 1])
+        partR(hatT, 'box', side * 0.14, 0.20, -0.28, hz + 0.3, side * 0.7, side * 0.35 + hs, 0.07, 0.30, 0.045, C.bandanaColor || [0.16, 0.16, 0.18]);
       break;
     case 'chef':
-      part(neck, 'cyl', 0, 0.465, 0, 0.48, 0.08, 0.48, [0.94, 0.94, 0.94]);
-      part(neck, 'cyl', 0, 0.655, 0, 0.56, 0.36, 0.56, [0.99, 0.99, 0.99]);
+      part(hatT, 'limb2', 0, 0.455, 0, 0.50, 0.09, 0.50, [0.94, 0.94, 0.94]);
+      part(hatT, 'ball', 0, 0.66, 0, 0.58, 0.42, 0.58, [0.99, 0.99, 0.99]);
       break;
     case 'tricorn':
-      part(neck, 'cyl', 0, 0.475, 0, 1.06, 0.06, 1.06, [0.12, 0.12, 0.16]);
-      part(neck, 'cyl', 0, 0.545, 0, 0.54, 0.22, 0.54, [0.12, 0.12, 0.16]);
-      partR(neck, 'box', 0, 0.505, -0.38, 0.5, 0, 0, 0.72, 0.32, 0.05, [0.12, 0.12, 0.16]);
-      part(neck, 'lowsphere', 0, 0.535, 0.38, 0.15, 0.15, 0.09, [0.94, 0.94, 0.94]);
+      part(hatT, 'torus', 0, 0.44, 0, 0.88, 0.32, 0.88, [0.12, 0.12, 0.16]);
+      part(hatT, 'limb2', 0, 0.44, 0, 0.82, 0.05, 0.82, [0.13, 0.13, 0.17]);
+      part(hatT, 'limb', 0, 0.545, 0, 0.55, 0.23, 0.55, [0.12, 0.12, 0.16]);
+      partR(hatT, 'box', 0, 0.505, -0.40, 0.5, 0, 0, 0.74, 0.32, 0.05, [0.12, 0.12, 0.16]);
+      part(hatT, 'ball', 0, 0.535, 0.40, 0.14, 0.14, 0.09, [0.94, 0.94, 0.94]);
       break;
     case 'cap':
-      part(neck, 'cyl', 0, 0.455, 0, 0.60, 0.20, 0.60, C.hatColor || [0.4, 0.2, 0.2]);
-      part(neck, 'box', 0, 0.415, 0.27, 0.46, 0.06, 0.30, C.hatColor || [0.4, 0.2, 0.2]);
+      part(hatT, 'ball', 0, 0.40, 0, 0.60, 0.34, 0.60, C.hatColor || [0.4, 0.2, 0.2]);
+      part(hatT, 'ball', 0, 0.40, 0.27, 0.44, 0.05, 0.30, C.hatColor || [0.4, 0.2, 0.2]);
       break;
     case 'clown':
-      part(neck, 'cyl', 0, 0.455, 0, 0.70, 0.06, 0.70, [0.96, 0.96, 0.98]);
-      part(neck, 'cyl', 0, 0.495, 0, 0.52, 0.10, 0.52, [0.30, 0.36, 0.66]);
-      partR(neck, 'cone', 0, 0.625, 0, 0, 0, 0.14, 0.42, 0.40, 0.42, [0.90, 0.28, 0.32]);
-      part(neck, 'lowsphere', 0, 0.845, 0.03, 0.12, 0.12, 0.12, [0.96, 0.94, 0.30], 1, 0.25);
+      part(hatT, 'torus', 0, 0.44, 0, 0.64, 0.30, 0.64, [0.96, 0.96, 0.98]);
+      part(hatT, 'limb2', 0, 0.44, 0, 0.60, 0.05, 0.60, [0.97, 0.97, 0.99]);
+      part(hatT, 'limb', 0, 0.50, 0, 0.54, 0.12, 0.54, [0.30, 0.36, 0.66]);
+      partR(hatT, 'cone', 0, 0.635, 0, hz * 0.6, 0, 0.14 + hs, 0.42, 0.42, 0.42, [0.90, 0.28, 0.32]);
+      part(hatT, 'ball', 0, 0.855, 0.03, 0.12, 0.12, 0.12, [0.96, 0.94, 0.30], 1, 0.25);
       break;
     case 'topknot':
-      part(neck, 'lowsphere', 0, 0.47, -0.06, 0.20, 0.22, 0.20, C.hair);
+      part(hatT, 'ball', 0, 0.46, -0.06, 0.20, 0.22, 0.20, C.hair);
       break;
   }
 
-  /* accessories */
+  /* ---------------- accessories ---------------- */
   if (C.glasses) {
     for (const side of [-1, 1]) {
-      part(neck, 'cyl', side * 0.125, eyeY, 0.215, 0.135, 0.03, 0.135, [0.86, 0.90, 0.96], 0.5, 0.10);
-      part(neck, 'cyl', side * 0.125, eyeY, 0.212, 0.16, 0.025, 0.16, [0.10, 0.10, 0.12]);
+      part(neck, 'torus', side * 0.125, eyeY, eyeZ + 0.045, 0.20, 0.10, 0.20, [0.10, 0.10, 0.12]);
+      partR(neck, 'ball', side * 0.125, eyeY, eyeZ + 0.045, PI / 2, 0, 0, 0.14, 0.02, 0.14, [0.80, 0.88, 0.96], 0.45, 0.12);
     }
-    part(neck, 'box', 0, eyeY, 0.212, 0.11, 0.02, 0.02, [0.10, 0.10, 0.12]);
+    part(neck, 'box', 0, eyeY, eyeZ + 0.045, 0.10, 0.018, 0.02, [0.10, 0.10, 0.12]);
   }
-  if (C.goggles) part(neck, 'box', 0, 0.30, 0.19, 0.62, 0.14, 0.26, [0.20, 0.20, 0.24], 1, 0.03);
+  if (C.goggles) {
+    part(neck, 'limb2', 0, 0.30, 0.19, 0.62, 0.15, 0.34, [0.20, 0.20, 0.24]);
+    for (const side of [-1, 1]) part(neck, 'ball', side * 0.14, 0.30, 0.235, 0.11, 0.11, 0.06, [0.55, 0.72, 0.82], 1, 0.10);
+  }
   if (C.cigarette) {
-    partR(neck, 'cyl', 0.10, 0.095, 0.28, PI / 2, 0, 0.25, 0.028, 0.26, 0.028, [0.95, 0.95, 0.92]);
-    part(neck, 'lowsphere', 0.135, 0.085, 0.40, 0.038, 0.038, 0.038, [1.0, 0.42, 0.12], 1, 1.4);
+    partR(neck, 'limb2', 0.10, 0.095, 0.28, PI / 2, 0, 0.25, 0.028, 0.26, 0.028, [0.95, 0.95, 0.92]);
+    part(neck, 'ball', 0.135, 0.085, 0.40, 0.038, 0.038, 0.038, [1.0, 0.42, 0.12], 1, 1.4);
   }
   if (C.cigars) {
     for (const side of [-1, 1]) {
-      partR(neck, 'cyl', side * 0.065, 0.085, 0.29, PI / 2, 0, side * 0.18, 0.042, 0.32, 0.042, [0.42, 0.28, 0.18]);
-      part(neck, 'lowsphere', side * 0.09, 0.080, 0.45, 0.048, 0.048, 0.048, [1.0, 0.40, 0.10], 1, 1.4);
-      if (Math.random() < 0.35) FX.spawn({
-        x: o.x, y: o.y + 1.5 * s, z: o.z, vx: rnd(.3, -.3), vy: rnd(.9, .3), vz: rnd(.3, -.3),
-        life: 1.4, size: .55, r: .78, g: .80, b: .84, a: .35, grav: .5, drag: .8
-      });
+      partR(neck, 'limb2', side * 0.065, 0.085, 0.29, PI / 2, 0, side * 0.18, 0.042, 0.32, 0.042, [0.42, 0.28, 0.18]);
+      part(neck, 'ball', side * 0.09, 0.080, 0.45, 0.048, 0.048, 0.048, [1.0, 0.40, 0.10], 1, 1.4);
     }
+    if (Math.random() < 0.3) FX.spawn({
+      x: o.x, y: o.y + 1.5 * s, z: o.z, vx: rnd(.3, -.3), vy: rnd(.9, .3), vz: rnd(.3, -.3),
+      life: 1.4, size: .55, r: .78, g: .80, b: .84, a: .35, grav: .5, drag: .8
+    });
   }
-  if (C.beard) part(neck, 'box', 0, 0.055, 0.19, 0.30, 0.15, 0.17, C.beard);
+  if (C.beard) {
+    part(neck, 'ball', 0, 0.055, 0.16, 0.30, 0.17, 0.20, C.beard);
+    part(neck, 'ball', 0, 0.125, 0.175, 0.16, 0.05, 0.09, C.beard);
+  }
   if (C.jaw) {
-    part(neck, 'box', 0, 0.035, 0.175, 0.36, 0.15, 0.22, C.jaw);
+    part(neck, 'ball', 0, 0.045, 0.15, 0.36, 0.17, 0.26, C.jaw);
     for (let i = -2; i <= 2; i++) part(neck, 'box', i * 0.07, 0.105, 0.285, 0.045, 0.05, 0.03, [0.75, 0.77, 0.82]);
   }
   if (C.earrings) for (let i = 0; i < 3; i++)
-    part(neck, 'lowsphere', -0.196, 0.165 - i * 0.062, 0.0, 0.042, 0.05, 0.05, [0.95, 0.80, 0.28], 1, 0.25);
-  if (C.finBack) partR(torso, 'cone', 0, 0.46, -0.15, -0.35, 0, 0, 0.10, 0.52, 0.34, C.skin);
+    part(neck, 'ball', -0.225, 0.14 - i * 0.062, 0.0, 0.045, 0.05, 0.05, [0.95, 0.80, 0.28], 1, 0.25);
+  if (C.finBack) partR(torso, 'cone', 0, 0.46, -0.15, -0.35, 0, 0, 0.10, 0.52, 0.34, skin);
   if (C.finEars) for (const side of [-1, 1])
-    partR(neck, 'cone', side * 0.245, 0.22, -0.02, 0, 0, side * 1.55, 0.09, 0.30, 0.22, C.skin);
+    partR(neck, 'cone', side * 0.245, 0.20, -0.02, 0, 0, side * 1.55, 0.09, 0.30, 0.22, skin);
 
   if (o.detail) o.detail({
     root: _dRoot, hip: _dHip, torso: _dTorso, neck: _dNeck,
@@ -2464,6 +2795,35 @@ function waveNormal(x, z, t) {
   return [(hl - hr) / (2 * e), 1, (hd - hu) / (2 * e)];
 }
 
+/* walkable surfaces that are not terrain: piers, jetties, moored decks */
+function platformAt(x, z, maxY) {
+  let best = null;
+  for (const isl of world.islands) {
+    if (!isl.platforms || !isl.platforms.length) continue;
+    if (Math.abs(x - isl.x) > isl.half + 90 || Math.abs(z - isl.z) > isl.half + 90) continue;
+    for (const pl of isl.platforms) {
+      if (pl.y > maxY) continue;
+      const dx = x - (pl.x + isl.x), dz = z - (pl.z + isl.z);
+      const sh = Math.sin(pl.ry), ch = Math.cos(pl.ry);
+      const along = dx * sh + dz * ch, side = dx * ch - dz * sh;
+      if (Math.abs(side) > pl.hw || Math.abs(along) > pl.hd) continue;
+      if (best === null || pl.y > best) best = pl.y;
+    }
+  }
+  // your moored ship is a deck you can step onto
+  for (const sp of world.ships) {
+    if (sp.dead || Math.abs(sp.speed) > 3) continue;
+    const deckY = sp.y + sp.K.deck * 0.98 - (sp.K.draft || 0);
+    if (deckY > maxY) continue;
+    const dx = x - sp.x, dz = z - sp.z;
+    const sh = Math.sin(sp.ry), ch = Math.cos(sp.ry);
+    const along = dx * sh + dz * ch, side = dx * ch - dz * sh;
+    if (Math.abs(side) > sp.K.wid * 0.42 || Math.abs(along) > sp.K.len * 0.44) continue;
+    if (best === null || deckY > best) best = deckY;
+  }
+  return best;
+}
+
 /* ground query: highest terrain under a point, else sea */
 function groundAt(x, z) {
   let best = -999, isl = null;
@@ -2488,7 +2848,7 @@ const CHARS = {
   luffy: {
     name: 'Luffy', scale: 1.0, colors: {
       skin: SKIN.luffy, shirt: [0.80, 0.13, 0.11], pants: [0.30, 0.42, 0.70], pants2: [0.28, 0.40, 0.68],
-      hair: [0.09, 0.08, 0.08], hat: 'straw', open: true, scar: true, sandals: true, mouth: 'grin',
+      hair: [0.09, 0.08, 0.08], hat: 'straw', hatTilt: 0.16, open: true, scar: true, sandals: true, mouth: 'grin',
       belt: [0.94, 0.86, 0.42], eye: [0.10, 0.08, 0.08]
     },
     detail(D) {
@@ -2798,9 +3158,12 @@ class Actor {
     this.y += this.vy * dt;
     const g = groundAt(this.x, this.z);
     this.ground = g;
-    const floor = g.isl ? g.y : -999;
+    let floor = g.isl ? g.y : -999;
+    const plat = platformAt(this.x, this.z, this.y + 1.0);
+    this.onPlatform = false;
+    if (plat !== null && plat > floor) { floor = plat; this.onPlatform = true; }
     if (this.y <= floor) { this.y = floor; this.vy = 0; this.grounded = true; }
-    else this.grounded = false;
+    else { this.grounded = false; if (this.onPlatform) this.onPlatform = false; }
   }
   collideWorld() {
     const isl = this.ground && this.ground.isl;
@@ -2820,10 +3183,12 @@ class Actor {
 function defaultPose() {
   return {
     bob: 0, lean: 0, crouch: 0, hipX: 0, hipY: 0, torsoX: 0, torsoY: 0, torsoZ: 0,
-    headX: 0, headY: 0, capeX: 0.1,
-    legL: { x: 0, k: 0 }, legR: { x: 0, k: 0 },
-    armL: { x: 0, y: 0, z: 0.1, k: -0.2, stretch: 0, fist: 0 },
-    armR: { x: 0, y: 0, z: -0.1, k: -0.2, stretch: 0, fist: 0 },
+    headX: 0, headY: 0, headZ: 0, capeX: 0.1, capeFlap: 0,
+    blink: 0, gazeX: 0, gazeY: 0, browAngry: 0, browLift: 0, mouthOpen: 0,
+    hairSway: 0, hairSwayZ: 0,
+    legL: { x: 0, k: 0, f: 0 }, legR: { x: 0, k: 0, f: 0 },
+    armL: { x: 0, y: 0, z: 0.1, k: -0.2, w: 0, stretch: 0, fist: 0 },
+    armR: { x: 0, y: 0, z: -0.1, k: -0.2, w: 0, stretch: 0, fist: 0 },
   };
 }
 
@@ -2840,38 +3205,105 @@ function animateHumanoid(c, dt) {
   const ph = t * freq;
   const s = Math.sin(ph), s2 = Math.sin(ph * 2);
 
+  /* ---- blinking ---- */
+  if (c.blinkT === undefined) c.blinkT = rnd(4, 1);
+  c.blinkT -= dt;
+  if (c.blinkT < 0) {
+    const b = -c.blinkT;
+    P.blink = b < 0.06 ? b / 0.06 : (b < 0.13 ? 1 - (b - 0.06) / 0.07 : 0);
+    if (b > 0.14) { c.blinkT = rnd(6, 1.6); P.blink = 0; }
+  } else P.blink = 0;
+
+  /* ---- hair, hat and cape inertia ---- */
+  const ax = (c.vx - (c.pvx || 0)) / Math.max(dt, 0.001);
+  const az = (c.vz - (c.pvz || 0)) / Math.max(dt, 0.001);
+  c.pvx = c.vx; c.pvz = c.vz;
+  const fwd = Math.sin(c.ry), rgt = Math.cos(c.ry);
+  const localA = -(ax * fwd + az * rgt) * 0.006;
+  const localS = -(ax * rgt - az * fwd) * 0.006;
+  const windPush = (WIND ? WIND.gust : 1) * 0.02;
+  P.hairSway = damp(P.hairSway, clamp(localS + Math.sin(t * 2.1) * windPush, -0.35, 0.35), 9, dt);
+  P.hairSwayZ = damp(P.hairSwayZ, clamp(localA - spd * 0.012 + Math.sin(t * 1.7) * windPush, -0.4, 0.4), 9, dt);
+  P.capeFlap = damp(P.capeFlap, clamp(spd * 0.045 + Math.sin(t * 3.4) * 0.05, 0, 0.6), 6, dt);
+
+  /* ---- gaze: look at whatever matters right now ---- */
+  let look = null;
+  if (c.isPlayer) {
+    let best = null, bd = 22;
+    for (const e of world.entities) {
+      if (e.team !== 'enemy' || e.dead) continue;
+      const d = c.distTo(e);
+      if (d < bd) { bd = d; best = e; }
+    }
+    look = best;
+  } else {
+    const pl = getPlayer();
+    if (pl && !pl.dead && c.distTo(pl) < 16) look = pl;
+  }
+  if (!look && c.target) look = c.target;
+  if (look) {
+    const ang = angDelta(c.ry, Math.atan2(look.x - c.x, look.z - c.z));
+    P.gazeX = damp(P.gazeX, clamp(ang * 1.4, -1, 1), 7, dt);
+    P.gazeY = damp(P.gazeY, clamp((look.y - c.y) * 0.5, -1, 1), 7, dt);
+    P.headY = damp(P.headY, clamp(ang * 0.35, -0.5, 0.5), 6, dt);
+  } else {
+    P.gazeX = damp(P.gazeX, 0, 4, dt);
+    P.gazeY = damp(P.gazeY, 0, 4, dt);
+  }
+
   if (c.state === 'dead') {
     c.tilt = damp(c.tilt, -1.45, 7, dt);
     P.legL.x = damp(P.legL.x, 0.4, 6, dt); P.legR.x = damp(P.legR.x, -0.2, 6, dt);
     P.armL.x = damp(P.armL.x, 1.8, 6, dt); P.armR.x = damp(P.armR.x, 2.0, 6, dt);
     P.legL.k = P.legR.k = damp(P.legL.k, -0.3, 6, dt);
+    P.blink = 1; P.mouthOpen = damp(P.mouthOpen, 0.4, 5, dt);
     return;
   }
-  c.tilt = damp(c.tilt, 0, 8, dt);
+
+  /* ---- stand square to the ground under the feet ---- */
+  const g = c.ground;
+  if (g && g.isl && c.grounded) {
+    const n = g.isl.normalLocal(c.x - g.isl.x, c.z - g.isl.z);
+    const pitch = -(n[0] * fwd + n[2] * rgt) * 0.75;
+    const roll = (n[0] * rgt - n[2] * fwd) * 0.75;
+    c.tilt = damp(c.tilt, pitch, 8, dt);
+    c.roll = damp(c.roll, roll, 8, dt);
+  } else {
+    c.tilt = damp(c.tilt, 0, 8, dt);
+    c.roll = damp(c.roll, 0, 8, dt);
+  }
 
   const tgt = {
     legLx: -s * amp, legRx: s * amp,
     legLk: -Math.max(0, -s) * amp * 0.9 - (moving ? 0.15 : 0.03),
     legRk: -Math.max(0, s) * amp * 0.9 - (moving ? 0.15 : 0.03),
+    legLf: moving ? Math.max(0, -s) * 0.5 - 0.1 : 0,
+    legRf: moving ? Math.max(0, s) * 0.5 - 0.1 : 0,
     armLx: s * amp * 0.8, armRx: -s * amp * 0.8,
     bob: moving ? Math.abs(s2) * (run ? 0.09 : 0.05) - 0.03 : Math.sin(t * 1.9) * 0.018,
     lean: 0, torsoY: moving ? -s * 0.12 : Math.sin(t * 1.6) * 0.03,
-    armLz: 0.14 + (run ? 0.10 : 0), armRz: -0.14 - (run ? 0.10 : 0),
-    armLk: -0.25 - (run ? 0.9 : 0.15), armRk: -0.25 - (run ? 0.9 : 0.15),
+    hipY: moving ? s * 0.10 : 0,
+    armLz: 0.24 + (run ? 0.10 : 0), armRz: -0.24 - (run ? 0.10 : 0),
+    armLk: -0.42 - (run ? 0.8 : 0.10), armRk: -0.42 - (run ? 0.8 : 0.10),
     torsoX: run ? 0.16 : (moving ? 0.06 : 0), headX: run ? -0.10 : 0, crouch: 0,
+    browAngry: 0, browLift: 0, mouthOpen: run ? 0.25 : 0, fist: run ? 0.6 : 0,
   };
   if (!c.grounded) {
     tgt.legLx = 0.4; tgt.legRx = -0.25; tgt.legLk = -0.7; tgt.legRk = -0.2;
     tgt.armLx = -1.9; tgt.armRx = -1.9; tgt.armLk = -0.5; tgt.armRk = -0.5;
     tgt.torsoX = c.vy > 0 ? -0.15 : 0.1;
+    tgt.legLf = 0.3; tgt.legRf = 0.2; tgt.browLift = 1; tgt.mouthOpen = 0.4;
   }
   if (c.state === 'block') {
     tgt.armLx = -1.5; tgt.armRx = -1.5; tgt.armLk = -1.5; tgt.armRk = -1.5;
     tgt.armLz = 0.5; tgt.armRz = -0.5; tgt.crouch = -0.08; tgt.torsoX = 0.15;
+    tgt.browAngry = 1; tgt.fist = 1;
   }
   if (c.state === 'hurt') {
     tgt.torsoX = -0.45; tgt.headX = -0.3; tgt.armLx = -0.8; tgt.armRx = -0.8; tgt.crouch = -0.05;
+    tgt.browLift = 1; tgt.mouthOpen = 0.9;
   }
+  if (c.state === 'attack') { tgt.browAngry = 1; tgt.mouthOpen = 0.7; tgt.fist = 1; }
   if (c.state === 'sit') {
     tgt.legLx = -1.5; tgt.legRx = -1.5; tgt.legLk = -1.4; tgt.legRk = -1.4;
     tgt.crouch = -0.42; tgt.armLx = -0.2; tgt.armRx = -0.2;
@@ -2883,13 +3315,17 @@ function animateHumanoid(c, dt) {
   const k = c.state === 'hurt' ? 16 : 12;
   P.legL.x = damp(P.legL.x, tgt.legLx, k, dt); P.legR.x = damp(P.legR.x, tgt.legRx, k, dt);
   P.legL.k = damp(P.legL.k, tgt.legLk, k, dt); P.legR.k = damp(P.legR.k, tgt.legRk, k, dt);
+  P.legL.f = damp(P.legL.f, tgt.legLf, k, dt); P.legR.f = damp(P.legR.f, tgt.legRf, k, dt);
   P.bob = damp(P.bob, tgt.bob, 14, dt);
   P.torsoY = damp(P.torsoY, tgt.torsoY, 10, dt);
   P.torsoX = damp(P.torsoX, tgt.torsoX, 10, dt);
+  P.hipY = damp(P.hipY, tgt.hipY, 10, dt);
   P.headX = damp(P.headX, tgt.headX, 10, dt);
   P.crouch = damp(P.crouch, tgt.crouch, 12, dt);
   P.lean = damp(P.lean, tgt.lean, 10, dt);
-  // arms may be overridden by an attack timeline
+  P.browAngry = damp(P.browAngry, tgt.browAngry, 8, dt);
+  P.browLift = damp(P.browLift, tgt.browLift, 8, dt);
+  P.mouthOpen = damp(P.mouthOpen, tgt.mouthOpen, 9, dt);
   if (!c.armOverride) {
     P.armL.x = damp(P.armL.x, tgt.armLx, k, dt); P.armR.x = damp(P.armR.x, tgt.armRx, k, dt);
     P.armL.z = damp(P.armL.z, tgt.armLz, k, dt); P.armR.z = damp(P.armR.z, tgt.armRz, k, dt);
@@ -2897,6 +3333,9 @@ function animateHumanoid(c, dt) {
     P.armL.stretch = damp(P.armL.stretch, 0, 14, dt);
     P.armR.stretch = damp(P.armR.stretch, 0, 14, dt);
     P.armL.y = damp(P.armL.y, 0, 10, dt); P.armR.y = damp(P.armR.y, 0, 10, dt);
+    P.armL.fist = damp(P.armL.fist, tgt.fist, 10, dt);
+    P.armR.fist = damp(P.armR.fist, tgt.fist, 10, dt);
+    P.armL.w = damp(P.armL.w, 0, 10, dt); P.armR.w = damp(P.armR.w, 0, 10, dt);
   }
   // footstep dust
   if (moving && c.grounded && Math.sin(ph) * Math.sin(ph - dt * freq) < 0 && Math.random() < .8) {
@@ -3002,6 +3441,101 @@ canvas.addEventListener('click', () => { if (world.started && !world.paused && !
 addEventListener('blur', () => { INPUT.keys = {}; INPUT.mouse.left = INPUT.mouse.right = false; });
 
 /* ======================================================================
+   GAMEPAD  (PlayStation DualSense / DualShock, standard mapping)
+   ====================================================================== */
+const PS = {   // button indices in the standard gamepad mapping
+  CROSS: 0, CIRCLE: 1, SQUARE: 2, TRIANGLE: 3,
+  L1: 4, R1: 5, L2: 6, R2: 7, CREATE: 8, OPTIONS: 9, L3: 10, R3: 11,
+  UP: 12, DOWN: 13, LEFT: 14, RIGHT: 15, PS: 16, PAD: 17
+};
+const PAD_GLYPH = {
+  0: '&#10005;', 1: '&#9711;', 2: '&#9633;', 3: '&#9651;',
+  4: 'L1', 5: 'R1', 6: 'L2', 7: 'R2', 8: 'Create', 9: 'Options', 10: 'L3', 11: 'R3',
+  12: '&#9650;', 13: '&#9660;', 14: '&#9664;', 15: '&#9654;'
+};
+const PAD = {
+  connected: false, index: -1, id: '', dual: false,
+  lx: 0, ly: 0, rx: 0, ry: 0, l2: 0, r2: 0,
+  btn: [], prev: [], lookX: 0, lookY: 0, sprint: false,
+  dead: 0.16,
+  poll() {
+    const pads = navigator.getGamepads ? navigator.getGamepads() : [];
+    let g = null;
+    for (const p of pads) { if (p && p.connected) { g = p; break; } }
+    if (!g) {
+      if (this.connected) { this.connected = false; UI && UI.refreshPadHints && UI.refreshPadHints(); }
+      this.lx = this.ly = this.rx = this.ry = this.l2 = this.r2 = 0;
+      this.btn = []; return;
+    }
+    if (!this.connected || this.index !== g.index) {
+      this.connected = true; this.index = g.index; this.id = g.id || '';
+      this.dual = /dualsense|dualshock|playstation|054c/i.test(this.id);
+      this.gp = g;
+      if (typeof UI !== 'undefined' && UI.refreshPadHints) UI.refreshPadHints();
+      if (typeof UI !== 'undefined' && UI.toast) UI.toast((this.dual ? 'DualSense' : 'Controller') + ' connected');
+    }
+    this.gp = g;
+    const dz = v => Math.abs(v) < this.dead ? 0 : (v - Math.sign(v) * this.dead) / (1 - this.dead);
+    this.lx = dz(g.axes[0] || 0); this.ly = dz(g.axes[1] || 0);
+    this.rx = dz(g.axes[2] || 0); this.ry = dz(g.axes[3] || 0);
+    this.prev = this.btn;
+    this.btn = g.buttons.map(b => (typeof b === 'object' ? b.value : b));
+    this.l2 = this.btn[PS.L2] || 0;
+    this.r2 = this.btn[PS.R2] || 0;
+  },
+  down(i) { return (this.btn[i] || 0) > 0.5; },
+  hit(i) { return (this.btn[i] || 0) > 0.5 && (this.prev[i] || 0) <= 0.5; },
+  rumble(strong, weak, ms) {
+    const g = this.gp;
+    if (!g || !g.vibrationActuator || !g.vibrationActuator.playEffect) return;
+    try {
+      g.vibrationActuator.playEffect('dual-rumble', {
+        startDelay: 0, duration: ms, strongMagnitude: clamp(strong, 0, 1), weakMagnitude: clamp(weak, 0, 1)
+      });
+    } catch (e) { }
+  },
+  /* feed the shared input layer so every existing binding just works */
+  apply() {
+    this.poll();
+    if (!this.connected) { this.lookX = this.lookY = 0; return; }
+    const sail = world.mode === 'sail';
+    const press = (code, on) => {
+      if (on && !INPUT.keys[code]) INPUT.pressed[code] = true;
+      INPUT.keys[code] = !!on;
+    };
+    const map = sail ? {
+      [PS.TRIANGLE]: 'KeyE', [PS.SQUARE]: 'Mouse0', [PS.R1]: 'Mouse0',
+      [PS.OPTIONS]: 'Escape', [PS.CREATE]: 'KeyM', [PS.CROSS]: 'Space',
+    } : {
+      [PS.CROSS]: 'Space', [PS.CIRCLE]: 'ControlLeft', [PS.SQUARE]: 'Mouse0',
+      [PS.TRIANGLE]: 'KeyE', [PS.L1]: 'Mouse2', [PS.R1]: 'KeyR',
+      [PS.UP]: 'Digit1', [PS.RIGHT]: 'Digit2', [PS.DOWN]: 'Digit4', [PS.LEFT]: 'Digit5',
+      [PS.OPTIONS]: 'Escape', [PS.CREATE]: 'KeyM', [PS.R3]: 'KeyC',
+    };
+    for (const k in map) press(map[k], this.down(+k));
+    if (!sail) press('Digit3', this.r2 > 0.5);          // R2 = Gum-Gum Rocket
+    if (sail) { press('KeyW', this.r2 > 0.12); press('KeyS', this.l2 > 0.12); }
+    // dialogue and menus advance on Cross
+    if (this.hit(PS.CROSS)) INPUT.pressed['Space'] = true;
+    // sticks
+    this.sprint = this.down(PS.L3) || (!sail && this.l2 > 0.5);
+    if (sail) {
+      press('KeyA', this.lx < -0.3);
+      press('KeyD', this.lx > 0.3);
+    }
+    this.lookX = this.rx; this.lookY = this.ry;
+  },
+  moveVec() {
+    if (!this.connected) return null;
+    const m = Math.hypot(this.lx, this.ly);
+    if (m < 0.06) return null;
+    return { x: this.lx, z: -this.ly, mag: Math.min(m, 1) };
+  }
+};
+addEventListener('gamepadconnected', () => { PAD.poll(); });
+addEventListener('gamepaddisconnected', () => { PAD.connected = false; });
+
+/* ======================================================================
    CAMERA
    ====================================================================== */
 const CAM = {
@@ -3015,6 +3549,11 @@ const CAM = {
     if (INPUT.mouse.locked || INPUT.mouse.left || INPUT.mouse.right) {
       this.yaw += INPUT.mouse.dx * sens;
       this.pitch = clamp(this.pitch - INPUT.mouse.dy * sens, -1.25, 0.95);
+    }
+    if (PAD.connected && (Math.abs(PAD.lookX) > 0 || Math.abs(PAD.lookY) > 0)) {
+      const padSens = 2.9 * dt;
+      this.yaw += PAD.lookX * Math.abs(PAD.lookX) * padSens * 1.35;
+      this.pitch = clamp(this.pitch - PAD.lookY * Math.abs(PAD.lookY) * padSens, -1.25, 0.95);
     }
     // arrow keys always steer the camera, pointer lock or not
     const kTurn = 2.1 * dt;
@@ -3140,8 +3679,8 @@ function damageActor(t, amount, from, kx, kz, opts = {}) {
     vx: kx * 2 + rnd(3, -3), vy: rnd(5, 1), vz: kz * 2 + rnd(3, -3),
     life: .4, size: .28, r: guarded ? .8 : 1, g: guarded ? .9 : .84, b: guarded ? 1 : .5, a: .9, grav: -14, drag: 1.8
   });
-  if (t.isPlayer) { Audio2.SFX.hurt(); UI.hurtFlash(); shake(0.5); }
-  else Audio2.SFX.hit();
+  if (t.isPlayer) { Audio2.SFX.hurt(); UI.hurtFlash(); shake(0.5); PAD.rumble(0.75, 0.4, 170); }
+  else { Audio2.SFX.hit(); if (from && from.isPlayer) PAD.rumble(0.28, 0.5, 70); }
   if (t.hp <= 0) killActor(t, from);
   return dmg;
 }
@@ -3575,7 +4114,7 @@ class Player extends Character {
     /* ---- drowning: devil fruit users cannot swim ---- */
     const g = groundAt(this.x, this.z);
     const wh = waveHeight(this.x, this.z, world.t);
-    const inWater = (!g.isl || g.y < -0.4) && this.y < wh + 0.4 && !this.onShip;
+    const inWater = (!g.isl || g.y < -0.4) && this.y < wh + 0.4 && !this.onShip && !this.onPlatform;
     if (inWater && !this.onShip) {
       this.drowning += dt;
       this.state = 'hurt';
@@ -3604,7 +4143,7 @@ class Player extends Character {
       return;
     } else if (this.drowning > 0) { this.drowning = damp(this.drowning, 0, 4, dt); }
 
-    if (g.isl && g.y > 0.6 && this.grounded) this.lastSafe = { x: this.x, y: this.y, z: this.z };
+    if (this.grounded && (this.onPlatform || (g.isl && g.y > 0.6))) this.lastSafe = { x: this.x, y: this.y, z: this.z };
 
     /* ---- state machine ---- */
     if (this.state === 'hurt' && this.stateT > 0.34) { this.state = 'idle'; }
@@ -3616,15 +4155,19 @@ class Player extends Character {
     if (INPUT.down('KeyS')) mz -= 1;
     if (INPUT.down('KeyA')) mx -= 1;
     if (INPUT.down('KeyD')) mx += 1;
-    const ml = Math.hypot(mx, mz);
+    let analog = 1;
+    const pv = PAD.moveVec();
+    if (pv) { mx = pv.x; mz = pv.z; analog = pv.mag; }
+    let ml = Math.hypot(mx, mz);
     const cy = CAM.yaw;
     let wantX = 0, wantZ = 0;
     if (ml > 0) {
       mx /= ml; mz /= ml;
-      wantX = Math.sin(cy) * mz - Math.cos(cy) * mx;
-      wantZ = Math.cos(cy) * mz + Math.sin(cy) * mx;
+      wantX = (Math.sin(cy) * mz - Math.cos(cy) * mx) * analog;
+      wantZ = (Math.cos(cy) * mz + Math.sin(cy) * mx) * analog;
+      ml = analog;
     }
-    const sprinting = INPUT.down('ShiftLeft') && ml > 0 && this.stamina > 2;
+    const sprinting = (INPUT.down('ShiftLeft') || PAD.sprint) && ml > 0.5 && this.stamina > 2;
     let spd = this.speed * (sprinting ? 1.75 : 1) * (this.gear2 > 0 ? 1.7 : 1);
     if (this.state === 'block') spd *= 0.42;
     if (sprinting) this.stamina -= dt * 11;
@@ -3708,6 +4251,7 @@ class Player extends Character {
 }
 
 let P = null;   /* the player, created in newGame() */
+function getPlayer() { return P; }   // reachable from scopes that shadow P
 
 /* ======================================================================
    ENEMIES
@@ -4926,6 +5470,16 @@ class Ship {
       const fw = 0.7 + Math.abs(this.speed) * 0.025;
       const fx2 = Math.sin(this.ry), fz2 = Math.cos(this.ry);
       // the sea darkens under the hull and foams along it
+      if (this.player) {                       // beacon so your boat is findable from anywhere
+        const pulse = 0.55 + 0.45 * Math.sin(world.t * 2.2);
+        const top = this.y + this.K.mast + 6;
+        for (let i = 0; i < 7; i++) {
+          const t = i / 7;
+          pushSprite(this.x, this.y + 4 + t * (top - this.y - 4), this.z, 1.6 - t * 0.8,
+            1.0, 0.86, 0.42, 0.22 * (1 - t) * pulse, 0, 0, 0, 0);
+        }
+        pushSprite(this.x, top + 1.5, this.z, 2.2, 1.0, 0.88, 0.45, 0.5 * pulse, 0, 0, 1, 0);
+      }
       // billboarded foam along the waterline (ground-aligned quads vanish edge-on at sea level)
       const rx = Math.cos(this.ry), rz = -Math.sin(this.ry);   // ship's beam axis
       for (let i = -3; i <= 3; i++) {
@@ -5201,7 +5755,13 @@ const Quests = {
     if (!c || !s) return null;
     const isl = world.islands.find(i => i.id === (s.island || c.island));
     if (!isl) return null;
-    if (s.type === 'reach') return { x: isl.x, z: isl.z, isl };
+    if (s.type === 'reach') {
+      if (world.mode !== 'sail') {
+        const ship = world.ships.find(x => x.player && !x.dead);
+        if (ship && P && dist(ship.x, ship.z, P.x, P.z) > 12) return { x: ship.x, z: ship.z, isl, ship: true };
+      }
+      return { x: isl.x, z: isl.z, isl };
+    }
     if (s.type === 'boss' && isl.markers.boss) return { x: isl.x + isl.markers.boss.x, z: isl.z + isl.markers.boss.z, isl };
     if (s.type === 'talk') {
       const npc = world.entities.find(e => e.isNPC && e.dialogueId === s.target);
@@ -5370,7 +5930,25 @@ function buyItem(kind, cost) {
   Audio2.SFX.coin(); UI.refreshStats();
 }
 
+/* nudge a spawn out of any building it landed inside */
+function freeSpot(isl, x, z, rad = 1.4) {
+  for (let iter = 0; iter < 30; iter++) {
+    let moved = false;
+    for (const c of isl.colliders) {
+      const d = dist(x, z, c.x, c.z);
+      const min = c.r + rad + 1.0;
+      if (d < min && d > 0.001) {
+        x += (x - c.x) / d * (min - d + 0.05);
+        z += (z - c.z) / d * (min - d + 0.05);
+        moved = true;
+      }
+    }
+    if (!moved) break;
+  }
+  return { x, z };
+}
 function addNPC(isl, preset, x, z, dialogueId, name, state) {
+  const f = freeSpot(isl, x, z, 1.6); x = f.x; z = f.z;
   const y = isl.height(isl.x + x, isl.z + z);
   const n = new NPC({
     x: isl.x + x, y, z: isl.z + z, preset, dialogueId, name,
@@ -5381,6 +5959,7 @@ function addNPC(isl, preset, x, z, dialogueId, name, state) {
   return n;
 }
 function addEnemy(isl, preset, x, z, tier) {
+  const f = freeSpot(isl, x, z, 1.4); x = f.x; z = f.z;
   const y = isl.height(isl.x + x, isl.z + z);
   const e = new Enemy({ x: isl.x + x, y, z: isl.z + z, preset, tier: tier || 0 });
   e.island = isl;
@@ -5388,6 +5967,7 @@ function addEnemy(isl, preset, x, z, tier) {
   return e;
 }
 function addChest(isl, x, z, loot) {
+  const f = freeSpot(isl, x, z, 1.6); x = f.x; z = f.z;
   isl.chests.push({ x: isl.x + x, y: isl.height(isl.x + x, isl.z + z), z: isl.z + z, opened: false, loot: loot || (2000 + Math.random() * 6000 | 0) });
 }
 
@@ -5567,6 +6147,7 @@ const UI = {
     bind('btn-quit2', () => location.reload());
     bind('btn-respawn', () => respawnPlayer());
     this.refreshSkills();
+    this.refreshPadHints();
     // portrait
     const pc = document.createElement('canvas'); pc.width = pc.height = 96;
     const g = pc.getContext('2d');
@@ -5581,6 +6162,50 @@ const UI = {
     $('portrait').appendChild(pc);
   },
   setMode(m) { this.mode = m; },
+  padSwap(html) {
+    if (!PAD.connected || typeof html !== 'string') return html;
+    return html
+      .replace(/<b>E<\/b>/g, '<b>&#9651;</b>')
+      .replace(/<b>LMB<\/b>/g, '<b>&#9633;</b>')
+      .replace(/<b>R<\/b>/g, '<b>R1</b>')
+      .replace(/<span class="kbd">E<\/span>/g, '<span class="kbd">&#9651;</span>')
+      .replace(/<span class="kbd">W\/S<\/span>/g, '<span class="kbd">R2\/L2</span>')
+      .replace(/<span class="kbd">A\/D<\/span>/g, '<span class="kbd">Left stick</span>')
+      .replace(/<span class="kbd">LMB<\/span>/g, '<span class="kbd">&#9633;</span>');
+  },
+  refreshPadHints() {
+    const on = PAD.connected;
+    const padKeys = { bazooka: PAD_GLYPH[12], gatling: PAD_GLYPH[15], rocket: 'R2', whip: PAD_GLYPH[13], gear2: PAD_GLYPH[14] };
+    TECHS.forEach(t => {
+      const el = $('slot-' + t.id); if (!el) return;
+      const k = el.querySelector('.k');
+      if (k) k.innerHTML = on ? padKeys[t.id] : t.key;
+    });
+    const dn = $('dnext');
+    if (dn) dn.innerHTML = on ? '[&#10005;] continue' : '[Space] continue';
+    const pc = $('p-controls');
+    if (pc) pc.innerHTML = on ? [
+      '<span class="kbd">Left stick</span> move &nbsp; <span class="kbd">Right stick</span> camera',
+      '<span class="kbd">&#9633;</span> attack &nbsp; <span class="kbd">L1</span> guard',
+      '<span class="kbd">&#10005;</span> jump &nbsp; <span class="kbd">&#9711;</span> dodge &nbsp; <span class="kbd">L3</span> sprint',
+      '<span class="kbd">&#9651;</span> interact / board / land &nbsp; <span class="kbd">R1</span> eat meat',
+      '<span class="kbd">&#9650;</span><span class="kbd">&#9654;</span><span class="kbd">&#9660;</span><span class="kbd">&#9664;</span> techniques &nbsp; <span class="kbd">R2</span> Gum-Gum Rocket',
+      'At sea: <span class="kbd">R2</span> throttle &nbsp; <span class="kbd">L2</span> reverse &nbsp; <span class="kbd">Left stick</span> steer &nbsp; <span class="kbd">&#9633;</span> cannon',
+      '<span class="kbd">Options</span> pause &nbsp; <span class="kbd">Create</span> map &nbsp; <span class="kbd">R3</span> crew',
+    ].join('<br>') : [
+      '<span class="kbd">W A S D</span> move / steer',
+      '<span class="kbd">Mouse</span> or <span class="kbd">&larr;</span><span class="kbd">&rarr;</span> look around',
+      '<span class="kbd">Shift</span> sprint &nbsp; <span class="kbd">Space</span> jump / anchor',
+      '<span class="kbd">Ctrl</span> dodge roll &nbsp; <span class="kbd">R</span> eat meat',
+      '<span class="kbd">LMB</span> attack combo &nbsp; <span class="kbd">RMB</span> guard',
+      '<span class="kbd">1</span>-<span class="kbd">5</span> techniques &nbsp; <span class="kbd">E</span> interact',
+      '<span class="kbd">M</span> map &nbsp; <span class="kbd">C</span> crew &nbsp; <span class="kbd">K</span> techniques',
+      '<span class="kbd">P</span> music on/off &nbsp; <span class="kbd">Esc</span> pause',
+    ].join('<br>');
+    const hint = document.querySelector('#title .hint');
+    if (hint && on) hint.innerHTML =
+      '<span class="kbd">Left stick</span> move &nbsp;<span class="kbd">Right stick</span> camera &nbsp;<span class="kbd">&#9633;</span> attack &nbsp;<span class="kbd">L1</span> guard &nbsp;<span class="kbd">&#10005;</span> jump &nbsp;<span class="kbd">&#9711;</span> dodge &nbsp;<span class="kbd">&#9651;</span> interact &nbsp;<span class="kbd">D-pad</span> techniques';
+  },
   refreshGfx() {
     const el = $('gfx-state');
     if (!el) return;
@@ -5696,7 +6321,7 @@ const UI = {
   toast(html, big) {
     const t = document.createElement('div');
     t.className = 'toast' + (big ? ' big' : '');
-    t.innerHTML = html;
+    t.innerHTML = this.padSwap(html);
     $('toasts').appendChild(t);
     setTimeout(() => { t.style.transition = 'opacity .5s,transform .5s'; t.style.opacity = 0; t.style.transform = 'translateY(-10px)'; }, big ? 3400 : 2400);
     setTimeout(() => t.remove(), big ? 3900 : 2900);
@@ -5705,7 +6330,7 @@ const UI = {
     const h = $('hurt'); h.style.opacity = .85;
     setTimeout(() => h.style.opacity = 0, 130);
   },
-  showPrompt(html) { const p = $('prompt'); p.innerHTML = html; p.classList.remove('hidden'); this.promptShown = true; },
+  showPrompt(html) { const p = $('prompt'); p.innerHTML = this.padSwap(html); p.classList.remove('hidden'); this.promptShown = true; },
   hidePrompt() { if (this.promptShown) { $('prompt').classList.add('hidden'); this.promptShown = false; } },
   bossIntro(b) {
     $('bossbar').classList.remove('hidden');
@@ -6809,6 +7434,7 @@ function update(dt) {
   updateEnvironment(dt);
   updateWind(dt);
 
+  if (!world.started) { PAD.apply(); } 
   if (!world.started) { // title cinematic
     const isl = world.islands[0];
     const a = world.t * 0.055;
@@ -6833,6 +7459,7 @@ function update(dt) {
     return;
   }
 
+  PAD.apply();
   Dialogue.update(dt);
 
   /* global keys */

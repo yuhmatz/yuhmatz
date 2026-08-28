@@ -23,6 +23,27 @@ First load takes a second or two while the eight islands are generated.
 
 ## Controls
 
+A PlayStation controller (DualSense / DualShock) is supported out of the box — plug it in and the
+on-screen prompts switch to ✕ ○ □ △ automatically. Analog sticks drive movement and camera,
+the triggers are the ship's throttle, and hits rumble the pad.
+
+| DualSense | Keyboard | Action |
+| --- | --- | --- |
+| Left stick | `W A S D` | Move (on foot) / steer (at sea) |
+| Right stick | Mouse / `← →` | Camera |
+| `□` | `LMB` | Attack combo / fire cannons |
+| `L1` | `RMB` | Guard |
+| `✕` | `Space` | Jump / drop anchor |
+| `○` | `Ctrl` | Dodge roll |
+| `△` | `E` | Talk, chests, board ship, go ashore |
+| D-pad + `R2` | `1`–`5` | Techniques (R2 = Gum-Gum Rocket) |
+| `R2` / `L2` | `W` / `S` | Throttle / reverse at sea |
+| `L3` | `Shift` | Sprint |
+| `R1` | `R` | Eat meat |
+| `Options` | `Esc` | Pause &middot; `Create`/`M` map &middot; `R3`/`C` crew |
+
+### Keyboard reference
+
 | Input | Action |
 | --- | --- |
 | `W A S D` | Move (on foot) / throttle and steer (at sea) |
@@ -42,7 +63,10 @@ First load takes a second or two while the eight islands are generated.
 ## What's in it
 
 **A continuous ocean world.** Eight procedurally generated islands sit in one 11 km × 5 km sea
-with no loading screens between them. Gerstner-wave water with sun glitter, surf that breaks on
+with no loading screens between them. Each island is shaped by headlands, bays and a cliff coast
+rather than being a disc; a dirt road runs from the pier up to the town and on to the island's
+landmark, houses line that road, forests clump into groves and clearings, and a plank pier you can
+actually walk out on connects the beach to your moored boat. Gerstner-wave water with sun glitter, surf that breaks on
 the actual coastline (driven by a world depth map), a 22-minute day/night cycle, and weather
 that rolls between clear, overcast, rain and storm — storms visibly raise the swell.
 
@@ -134,6 +158,14 @@ Saves are automatic every 45 seconds into `localStorage`, plus a manual save fro
   (idle, walk, run, attack, hurt, guard, downed). Luffy's arms literally stretch by scaling the
   limb segments. One shared rig covers proportions, faces and clothing; each character then adds
   a `detail()` pass that hangs their signature parts off the rig's own bone matrices.
+  The rig is built from smooth primitives — a 22×14 sphere, a tapered limb solid and a torus —
+  with joints tucked inside the limb silhouette, layered hair, and faces that blink, track what
+  matters with their eyes, raise their brows and open their mouths mid-swing. Characters stand
+  square to the slope under their feet, and hair, hats and capes lag behind hard changes of
+  direction.
+- **Input** — keyboard and mouse, or a DualSense pad read through the Gamepad API: analog sticks,
+  analog triggers for the ship's throttle, dual-rumble on hits, and prompts that swap to
+  ✕ ○ □ △ glyphs the moment a pad is connected.
 - **Ships** — hulls are built from tapered planks with a sheer line that rises fore and aft, a real
   draft so they sit *in* the water, a painted waterline and billboarded foam along it. Each vessel
   has its own character: the Going Merry's sheep figurehead, front lawn and straw-hat sail; the
